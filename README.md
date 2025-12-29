@@ -10,10 +10,14 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 - **Dual-Core Processing** - UDP listener runs on core 0 for reliable packet reception
 - **Web Configuration Interface** - Configure all settings via browser
 - **Multiple Network Options** - Ethernet (W5500), WiFi, or AP fallback mode
-- **mDNS Support** - Access via hostname.local (e.g., `http://ESP-TSL-Tally.local`)
+- **Multi-Device Discovery** - Find and control all tally lights on the network via mDNS
+- **Bulk Control** - Test all devices simultaneously from any tally's web interface
+- **Captive Portal** - Automatic configuration page popup in AP mode
+- **Unique Device Identity** - Each device gets a unique hostname based on MAC address
+- **mDNS Support** - Access via hostname.local (e.g., `http://Tally-AABBCC.local`)
 - **OTA Updates** - Over-the-air firmware updates
 - **Persistent Settings** - Configuration stored in NVS flash
-- **Factory Reset** - Hold BOOT button for 3 seconds to reset
+- **Factory Reset** - Hold BOOT button for 3 seconds, or use web interface button
 
 ## Hardware
 
@@ -58,11 +62,18 @@ Access the configuration page at the device IP or via mDNS (`http://hostname.loc
 
 ### Test Buttons
 
-Manual tally control buttons for testing:
-- **OFF** - Turn off LEDs
+Manual tally control buttons for testing (momentary - hold to activate):
 - **GREEN** - Preview/safe
 - **RED** - Program/on-air
 - **YELLOW** - Both tallies active
+
+### Network Devices
+
+Discover and control other tally lights on your network:
+- **Scan Network** - Find all tally devices via mDNS
+- Device list shows hostname, TSL address, IP, and live status
+- Click any device to open its configuration page
+- **Bulk control buttons** - Set all devices to Green, Red, or Off simultaneously
 
 ### TSL Settings
 
@@ -87,7 +98,7 @@ TSL brightness levels (0-3) are mapped to 0 through max brightness.
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Hostname | Device hostname for mDNS | ESP-TSL-Tally |
+| Hostname | Device hostname for mDNS | Tally-XXYYZZ (unique per device) |
 | IP Mode | DHCP or Static | DHCP |
 | Static IP | IP address (if static) | 192.168.1.100 |
 | Gateway | Gateway address | 192.168.1.1 |
@@ -104,11 +115,12 @@ TSL brightness levels (0-3) are mapped to 0 through max brightness.
 
 ### AP Mode (Fallback)
 
-When no network is available:
-- SSID: `TSL-Tally-Setup`
+When no network is available, the device creates its own access point:
+- SSID: `Tally-XXYYZZ-Setup` (unique per device)
 - Password: `tallytally`
 - IP: `192.168.4.1`
 - LED indicator: Cyan pulse
+- **Captive Portal** - Configuration page opens automatically when you connect
 
 ## LED Indicators
 
@@ -156,8 +168,11 @@ The device listens for TSL 3.1 UMD protocol messages on the configured multicast
 |----------|--------|-------------|
 | `/` | GET | Configuration page |
 | `/status` | GET | JSON status (tally, text, IP, connection) |
+| `/info` | GET | JSON device info (hostname, MAC, TSL address, firmware) |
 | `/test?state=N` | GET | Set tally state (0-3) |
+| `/discover` | GET | Scan network and return found tally devices |
 | `/save` | POST | Save settings and reboot |
+| `/reset` | GET | Factory reset and reboot |
 
 ### Status Response
 
@@ -167,6 +182,33 @@ The device listens for TSL 3.1 UMD protocol messages on the configured multicast
   "text": "CAM 1",
   "ip": "192.168.1.100",
   "connection": "Ethernet"
+}
+```
+
+### Info Response
+
+```json
+{
+  "hostname": "Tally-AABBCC",
+  "ip": "192.168.1.100",
+  "mac": "AA:BB:CC:DD:EE:FF",
+  "tslAddress": 1,
+  "tallyState": "Green",
+  "tallyText": "CAM 1",
+  "connection": "Ethernet",
+  "firmware": "1.0.0"
+}
+```
+
+### Discover Response
+
+```json
+{
+  "devices": [
+    {"hostname": "Tally-112233", "ip": "192.168.1.51", "tslAddress": 2},
+    {"hostname": "Tally-445566", "ip": "192.168.1.52", "tslAddress": 3}
+  ],
+  "count": 2
 }
 ```
 
@@ -180,11 +222,18 @@ OTA is enabled when connected via Ethernet or WiFi (not in AP mode).
 
 ## Factory Reset
 
+### Hardware Reset
 1. Power on the device
 2. Hold the BOOT button (GPIO 0)
 3. Wait for red blinking (~3 seconds)
 4. Release when LED turns blue
 5. All settings reset to defaults
+
+### Web Interface Reset
+1. Open the device configuration page
+2. Click "Reset Defaults" button
+3. Confirm the reset
+4. Device reboots with factory settings
 
 ## Building
 
@@ -235,9 +284,10 @@ This separation ensures reliable multicast reception even when the web interface
 - FastLED - WS2812B LED control
 - WebServer - HTTP server
 - Preferences - NVS storage
-- ESPmDNS - mDNS responder
+- ESPmDNS - mDNS responder and service discovery
 - ArduinoOTA - Over-the-air updates
 - NetworkUDP - UDP multicast
+- DNSServer - Captive portal support
 
 ## License
 
