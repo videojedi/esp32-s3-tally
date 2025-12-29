@@ -17,16 +17,19 @@
 #define FIRMWARE_VERSION "1.0.0"
 #define MAX_DISCOVERED_DEVICES 16
 
-// Important to be defined BEFORE including ETH.h for ETH.begin() to work.
-// W5500 is SPI-based, doesn't need external clock - use GPIO_IN to avoid conflicts
-#define ETH_PHY_ADDR 1
-#define ETH_PHY_POWER   5
-#define ETH_PHY_MDC   23
-#define ETH_PHY_MDIO  18
-#define ETH_CLK_MODE ETH_CLOCK_GPIO_IN  // Changed from GPIO0_OUT to avoid WiFi conflict
-#define ETH_PHY_TYPE ETH_PHY_W5500
+// W5500 SPI Ethernet configuration - MUST be defined BEFORE including ETH.h
+#define ETH_PHY_TYPE    ETH_PHY_W5500
+#define ETH_PHY_ADDR    1
+#define ETH_PHY_CS      14
+#define ETH_PHY_IRQ     -1
+#define ETH_PHY_RST     9
+#define ETH_PHY_SPI_HOST SPI2_HOST
+#define ETH_PHY_SPI_SCK  13
+#define ETH_PHY_SPI_MISO 12
+#define ETH_PHY_SPI_MOSI 11
 
 #include <ETH.h>
+#include <SPI.h>
 #include <NetworkUdp.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
@@ -323,13 +326,23 @@ bool setupWiFi() {
   }
 
   Serial.printf("Connecting to WiFi: %s\n", wifiSSID.c_str());
+
+  // Make sure WiFi is in a clean state
+  WiFi.disconnect(true);
+  delay(100);
+  yield();
+
   WiFi.setHostname(deviceHostname.c_str());
   WiFi.mode(WIFI_STA);
+  delay(100);
+  yield();
+
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
 
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT) {
-    delay(500);
+    yield();  // Feed the watchdog
+    delay(100);
     Serial.print(".");
     // Blink purple while connecting
     fill_solid(leds, NUM_LEDS, ((millis() / 300) % 2) ? CRGB::Purple : CRGB::Black);
@@ -1009,13 +1022,20 @@ void setupWebServer() {
 
     saveSettings();
 
+    // Build the new address link
+    String newAddress = "http://" + deviceHostname + ".local/";
+    String ipAddress = useDHCP ? "(DHCP - check router)" : staticIP;
+
     String response = "<!DOCTYPE html><html><head>";
     response += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
     response += "<title>Settings Saved</title>";
-    response += "<style>body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.message{text-align:center}h1{color:#00d4ff}</style>";
+    response += "<style>body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.message{text-align:center}h1{color:#00d4ff}a{color:#00d4ff}</style>";
     response += "</head><body><div class=\"message\"><h1>Settings Saved!</h1>";
     response += "<p>Device is rebooting...</p>";
-    response += "<p>Please reconnect to the device at the new IP address.</p>";
+    response += "<p>Reconnect at: <a href=\"" + newAddress + "\">" + newAddress + "</a></p>";
+    if (!useDHCP) {
+      response += "<p>Or: <a href=\"http://" + staticIP + "/\">http://" + staticIP + "/</a></p>";
+    }
     response += "</div></body></html>";
 
     server.send(200, "text/html", response);
@@ -1093,13 +1113,25 @@ void setup() {
 
   // Try Ethernet first
   Serial.println("Starting Ethernet...");
-  bool ethStarted = ETH.begin();
+
+  // Hardware reset the W5500
+  pinMode(ETH_PHY_RST, OUTPUT);
+  digitalWrite(ETH_PHY_RST, LOW);
+  delay(50);
+  digitalWrite(ETH_PHY_RST, HIGH);
+  delay(50);
+
+  // Initialize W5500 - uses ETH_PHY_* defines set before ETH.h include
+  bool ethStarted = ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_CS, ETH_PHY_IRQ, ETH_PHY_RST,
+                               ETH_PHY_SPI_HOST, ETH_PHY_SPI_SCK, ETH_PHY_SPI_MISO, ETH_PHY_SPI_MOSI);
   Serial.printf("ETH.begin() returned: %s\n", ethStarted ? "true" : "false");
 
   if (ethStarted) {
-    // Wait for Ethernet with timeout
+    // Wait for Ethernet with timeout, feeding watchdog
+    Serial.println("Waiting for Ethernet connection...");
     unsigned long ethStartTime = millis();
-    while (!eth_connected && millis() - ethStartTime < 5000) {
+    while (!eth_connected && millis() - ethStartTime < 10000) {  // 10 second timeout
+      yield();  // Feed the watchdog
       delay(100);
       // Blink green while waiting for Ethernet
       fill_solid(leds, NUM_LEDS, ((millis() / 300) % 2) ? CRGB::Green : CRGB::Black);
@@ -1107,28 +1139,18 @@ void setup() {
     }
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
+    Serial.printf("Ethernet wait complete. Connected: %s\n", eth_connected ? "YES" : "NO");
   }
 
-  // If Ethernet connected, use it
+  // If Ethernet connected, use it exclusively
   if (eth_connected) {
-    Serial.println("Ethernet connected!");
-    // Also try WiFi if enabled (dual network)
-    if (wifiEnabled && wifiSSID.length() > 0) {
-      Serial.println("Also connecting to WiFi...");
-      setupWiFi();
-    }
+    Serial.println("Ethernet connected - using wired network");
   } else {
-    // No Ethernet - use WiFi or AP mode
-    Serial.println("Ethernet not connected, switching to WiFi/AP mode...");
+    // No Ethernet - try WiFi, then AP mode as fallback
+    Serial.println("Ethernet not connected, trying WiFi...");
 
-    // Stop Ethernet before using WiFi
-    ETH.end();
-    delay(100);
-
-    // Try WiFi if configured
     if (!setupWiFi()) {
-      // WiFi also failed or not configured, start AP
-      Serial.println("Starting AP mode for configuration...");
+      Serial.println("WiFi failed, starting AP mode for configuration...");
       startAP();
     }
   }

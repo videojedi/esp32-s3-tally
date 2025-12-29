@@ -9,7 +9,7 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 - **TSL 3.1 Protocol Support** - Receives multicast UDP tally commands
 - **Dual-Core Processing** - UDP listener runs on core 0 for reliable packet reception
 - **Web Configuration Interface** - Configure all settings via browser
-- **Multiple Network Options** - Ethernet (W5500), WiFi, or AP fallback mode
+- **Network Priority** - Ethernet preferred, WiFi fallback, AP mode for configuration
 - **Multi-Device Discovery** - Find and control all tally lights on the network via mDNS
 - **Bulk Control** - Test all devices simultaneously from any tally's web interface
 - **Captive Portal** - Automatic configuration page popup in AP mode
@@ -44,9 +44,12 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 
 ### W5500 SPI Ethernet
 
-The W5500 module connects via SPI. The ETH library uses these defines:
-- `ETH_PHY_TYPE` = W5500
-- `ETH_CLK_MODE` = GPIO_IN (avoids WiFi conflicts)
+The W5500 module connects via SPI. These defines must be set before including ETH.h:
+- `ETH_PHY_TYPE` = ETH_PHY_W5500
+- `ETH_PHY_CS` = 14 (Chip Select)
+- `ETH_PHY_RST` = 9 (Reset)
+- `ETH_PHY_SPI_HOST` = SPI2_HOST
+- `ETH_PHY_SPI_SCK/MISO/MOSI` = 13/12/11
 
 ## Web Interface
 
@@ -107,11 +110,13 @@ TSL brightness levels (0-3) are mapped to 0 through max brightness.
 
 ## Network Modes
 
+The device uses a single network interface at a time for simplicity and reliability:
+
 ### Priority Order
 
-1. **Ethernet** - Preferred if cable connected
+1. **Ethernet** - Used exclusively if cable connected (best for production)
 2. **WiFi** - Falls back if Ethernet unavailable
-3. **AP Mode** - Creates access point if both fail
+3. **AP Mode** - Creates access point if both fail (for initial configuration)
 
 ### AP Mode (Fallback)
 
