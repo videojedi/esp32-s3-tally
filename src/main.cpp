@@ -27,6 +27,7 @@
 #include <ETH.h>
 #include <NetworkUdp.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 
 // Forward declarations
 void loadSettings();
@@ -41,9 +42,13 @@ void setTallyState(int state);
 bool setupWiFi();
 void startAP();
 String getActiveIP();
+void startUDP();
+void stopUDP();
 void udpListenerTask(void *pvParameters);
 void startUDPTask();
 void stopUDPTask();
+void startMDNS();
+void testLED();
 
 // Web server
 WebServer server(80);
@@ -418,15 +423,38 @@ void udpTSL(char *data) {
     }
     text.trim();  // Remove trailing spaces
     currentTallyText = text;
-    Serial.println(text);
+    Serial.printf("Text: %s\n", text.c_str());
 
     Bright = message[1] & 0b00110000;
     Bright = Bright >> 4;
     Bright = map(Bright, 0, 3, 0, maxBrightness);
-    Serial.println(Bright);
+    Serial.printf("Brightness: %d\n", Bright);
     FastLED.setBrightness(Bright);
 
     setTallyState(T);
+  }
+}
+
+// Start UDP multicast listener
+void startUDP() {
+  if (udpRunning) return;
+
+  Serial.println("Joining multicast group...");
+  if (udp.beginMulticast(multicastAddress, tslPort)) {
+    Serial.printf("UDP multicast listening on %s:%d\n",
+                  multicastAddress.toString().c_str(), tslPort);
+    udpRunning = true;
+  } else {
+    Serial.println("Failed to start multicast UDP!");
+  }
+}
+
+// Stop UDP listener
+void stopUDP() {
+  if (udpRunning) {
+    udp.stop();
+    udpRunning = false;
+    Serial.println("[UDP] Stopped");
   }
 }
 
@@ -434,31 +462,22 @@ void udpTSL(char *data) {
 void udpListenerTask(void *pvParameters) {
   Serial.printf("[UDP Task] Running on core %d\n", xPortGetCoreID());
 
-  // Start multicast UDP listener
-  if (udp.beginMulticast(multicastAddress, tslPort)) {
-    Serial.printf("[UDP Task] Multicast listening on %s:%d\n",
-                  multicastAddress.toString().c_str(), tslPort);
-    udpRunning = true;
-  } else {
-    Serial.println("[UDP Task] Failed to start multicast UDP!");
-    vTaskDelete(NULL);
-    return;
-  }
-
   char buffer[256];
 
   for (;;) {
-    int packetSize = udp.parsePacket();
-    if (packetSize) {
-      IPAddress remote = udp.remoteIP();
-      uint16_t port = udp.remotePort();
+    if (udpRunning) {
+      int packetSize = udp.parsePacket();
+      if (packetSize) {
+        IPAddress remote = udp.remoteIP();
+        uint16_t port = udp.remotePort();
 
-      int len = udp.read(buffer, sizeof(buffer) - 1);
-      if (len > 0) {
-        buffer[len] = '\0';
-        Serial.printf("[UDP] From %s:%d, Length: %d\n",
-                      remote.toString().c_str(), port, len);
-        udpTSL(buffer);
+        int len = udp.read(buffer, sizeof(buffer) - 1);
+        if (len > 0) {
+          buffer[len] = '\0';
+          Serial.printf("[UDP] From %s:%d, Length: %d\n",
+                        remote.toString().c_str(), port, len);
+          udpTSL(buffer);
+        }
       }
     }
     // Small delay to yield CPU time
@@ -472,6 +491,9 @@ void startUDPTask() {
     Serial.println("[UDP] Task already running");
     return;
   }
+
+  // Start UDP first, then the task
+  startUDP();
 
   xTaskCreatePinnedToCore(
     udpListenerTask,   // Task function
@@ -490,10 +512,36 @@ void stopUDPTask() {
   if (udpTaskHandle != NULL) {
     vTaskDelete(udpTaskHandle);
     udpTaskHandle = NULL;
-    udpRunning = false;
-    udp.stop();
     Serial.println("[UDP] Task stopped");
   }
+  stopUDP();
+}
+
+// Start mDNS responder
+void startMDNS() {
+  if (MDNS.begin(deviceHostname.c_str())) {
+    Serial.printf("mDNS responder started: http://%s.local\n", deviceHostname.c_str());
+    MDNS.addService("http", "tcp", 80);
+    MDNS.addService("tally", "tcp", 80);  // Custom service for tally discovery
+  } else {
+    Serial.println("mDNS start failed");
+  }
+}
+
+// LED test routine - cycles through R/G/B
+void testLED() {
+  FastLED.setBrightness(maxBrightness);
+  fill_solid(leds, NUM_LEDS, CRGB::Red);
+  FastLED.show();
+  delay(500);
+  fill_solid(leds, NUM_LEDS, CRGB::Green);
+  FastLED.show();
+  delay(500);
+  fill_solid(leds, NUM_LEDS, CRGB::Blue);
+  FastLED.show();
+  delay(500);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
 }
 
 // HTML page for configuration
@@ -794,6 +842,12 @@ void setup() {
 
     // Start UDP listener task on core 0 (main loop runs on core 1)
     startUDPTask();
+
+    // Start mDNS responder
+    startMDNS();
+
+    // Run LED test to indicate successful network connection
+    testLED();
   } else {
     Serial.println("No network connection for TSL - AP mode only for configuration");
   }
