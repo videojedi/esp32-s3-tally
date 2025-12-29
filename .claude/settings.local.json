@@ -4,7 +4,10 @@
       "Bash(pip3 install:*)",
       "Bash(/Users/richard/Library/Python/3.10/bin/pio run:*)",
       "Bash(/Users/richard/Library/Python/3.10/bin/pio device monitor:*)",
-      "Bash(lsof:*)"
+      "Bash(lsof:*)",
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)"
     ]
   }
 }
