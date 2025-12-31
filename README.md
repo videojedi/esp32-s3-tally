@@ -10,7 +10,7 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 - **Dual-Core Processing** - UDP listener runs on core 0 for reliable packet reception
 - **Web Configuration Interface** - Configure all settings via browser
 - **Network Priority** - Ethernet preferred, WiFi fallback, AP mode for configuration
-- **Multi-Device Discovery** - Find and control all tally lights on the network via mDNS
+- **Auto Device Discovery** - Automatically finds all tally lights on the network via mDNS
 - **Bulk Control** - Test all devices simultaneously from any tally's web interface
 - **Captive Portal** - Automatic configuration page popup in AP mode
 - **Unique Device Identity** - Each device gets a unique hostname based on MAC address
@@ -72,8 +72,9 @@ Manual tally control buttons for testing (momentary - hold to activate):
 
 ### Network Devices
 
-Discover and control other tally lights on your network:
-- **Scan Network** - Find all tally devices via mDNS
+Automatically discovers and displays other tally lights on your network:
+- **Auto-discovery** - Devices are found automatically on page load and every 60 seconds
+- **Scan Network** - Manual refresh button to re-scan immediately
 - Device list shows hostname, TSL address, IP, and live status
 - Click any device to open its configuration page
 - **Bulk control buttons** - Set all devices to Green, Red, or Off simultaneously
@@ -224,6 +225,32 @@ OTA is enabled when connected via Ethernet or WiFi (not in AP mode).
 - Hostname: Configured device hostname
 - Password: `password`
 - Port: Default (3232)
+
+### Single Device Update
+
+```bash
+# Set target IP and upload
+TALLY_IP=192.168.1.100 pio run -t upload -e ota
+
+# Or use mDNS hostname
+TALLY_IP=Tally-AABBCC.local pio run -t upload -e ota
+```
+
+### Bulk Update All Devices
+
+Use the included script to update all tally lights on the network:
+
+```bash
+# Provide any known device IP - it discovers the rest
+./ota-update-all.sh 192.168.1.100
+```
+
+The script will:
+1. Build the firmware
+2. Query the device to discover all tallies on the network
+3. Show the device list and ask for confirmation
+4. Update each device via OTA
+5. Report success/failure summary
 
 ## Factory Reset
 

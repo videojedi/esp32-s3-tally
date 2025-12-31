@@ -34,6 +34,12 @@
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
+#include <HTTPClient.h>
+#include <Update.h>
+
+// GitHub OTA Update configuration
+#define GITHUB_REPO "videojedi/esp32-s3-tally"
+#define GITHUB_API_URL "https://api.github.com/repos/videojedi/esp32-s3-tally/releases/latest"
 
 // Forward declarations
 void loadSettings();
@@ -121,6 +127,12 @@ struct TallyDevice {
 TallyDevice discoveredDevices[MAX_DISCOVERED_DEVICES];
 int numDiscoveredDevices = 0;
 unsigned long lastDiscoveryScan = 0;
+
+// GitHub OTA update state
+String latestVersion = "";
+String firmwareURL = "";
+bool updateAvailable = false;
+bool updateInProgress = false;
 
 // Generate unique default hostname using ESP32 base MAC address
 String getDefaultHostname() {
@@ -633,6 +645,163 @@ void discoverTallyDevices() {
   Serial.printf("[Discovery] Total devices found: %d\n", numDiscoveredDevices);
 }
 
+// Compare version strings (returns true if v2 > v1)
+bool isNewerVersion(const String& v1, const String& v2) {
+  // Strip 'v' prefix if present
+  String ver1 = v1.startsWith("v") ? v1.substring(1) : v1;
+  String ver2 = v2.startsWith("v") ? v2.substring(1) : v2;
+
+  // Simple string comparison works for semantic versioning
+  // e.g., "1.0.1" > "1.0.0", "1.1.0" > "1.0.9"
+  int parts1[3] = {0, 0, 0};
+  int parts2[3] = {0, 0, 0};
+
+  sscanf(ver1.c_str(), "%d.%d.%d", &parts1[0], &parts1[1], &parts1[2]);
+  sscanf(ver2.c_str(), "%d.%d.%d", &parts2[0], &parts2[1], &parts2[2]);
+
+  for (int i = 0; i < 3; i++) {
+    if (parts2[i] > parts1[i]) return true;
+    if (parts2[i] < parts1[i]) return false;
+  }
+  return false;
+}
+
+// Check GitHub for firmware updates
+void checkForUpdates() {
+  if (!eth_connected && !wifi_connected) {
+    Serial.println("[Update] No network connection");
+    return;
+  }
+
+  Serial.println("[Update] Checking GitHub for updates...");
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(10000);
+  http.begin(GITHUB_API_URL);
+  http.addHeader("User-Agent", "ESP32-Tally-OTA");
+  http.addHeader("Accept", "application/vnd.github.v3+json");
+
+  int httpCode = http.GET();
+  Serial.printf("[Update] GitHub API response: %d\n", httpCode);
+
+  if (httpCode == 200) {
+    String payload = http.getString();
+
+    // Parse tag_name for version
+    int tagStart = payload.indexOf("\"tag_name\":\"");
+    if (tagStart > 0) {
+      tagStart += 12;
+      int tagEnd = payload.indexOf("\"", tagStart);
+      latestVersion = payload.substring(tagStart, tagEnd);
+      Serial.printf("[Update] Latest version: %s, Current: %s\n",
+                    latestVersion.c_str(), FIRMWARE_VERSION);
+    }
+
+    // Find firmware.bin in assets
+    int assetsStart = payload.indexOf("\"assets\":");
+    if (assetsStart > 0) {
+      int binStart = payload.indexOf("\"browser_download_url\":", assetsStart);
+      while (binStart > 0) {
+        binStart += 24;
+        int binEnd = payload.indexOf("\"", binStart);
+        String url = payload.substring(binStart, binEnd);
+        if (url.endsWith("firmware.bin")) {
+          firmwareURL = url;
+          Serial.printf("[Update] Firmware URL: %s\n", firmwareURL.c_str());
+          break;
+        }
+        binStart = payload.indexOf("\"browser_download_url\":", binEnd);
+      }
+    }
+
+    // Check if update is available
+    if (latestVersion.length() > 0 && isNewerVersion(FIRMWARE_VERSION, latestVersion)) {
+      updateAvailable = true;
+      Serial.println("[Update] New version available!");
+    } else {
+      updateAvailable = false;
+      Serial.println("[Update] Firmware is up to date");
+    }
+  } else {
+    Serial.printf("[Update] Failed to check for updates: %d\n", httpCode);
+  }
+
+  http.end();
+}
+
+// Perform OTA update from GitHub
+void performOTAUpdate() {
+  if (firmwareURL.length() == 0) {
+    Serial.println("[Update] No firmware URL available");
+    return;
+  }
+
+  if (updateInProgress) {
+    Serial.println("[Update] Update already in progress");
+    return;
+  }
+
+  updateInProgress = true;
+  Serial.printf("[Update] Downloading firmware from: %s\n", firmwareURL.c_str());
+
+  // Show update in progress on LEDs
+  fill_solid(leds, NUM_LEDS, CRGB::Purple);
+  FastLED.show();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(30000);
+  http.begin(firmwareURL);
+
+  int httpCode = http.GET();
+  Serial.printf("[Update] Download response: %d\n", httpCode);
+
+  if (httpCode == 200) {
+    int contentLength = http.getSize();
+    Serial.printf("[Update] Firmware size: %d bytes\n", contentLength);
+
+    if (contentLength > 0) {
+      WiFiClient* stream = http.getStreamPtr();
+
+      if (Update.begin(contentLength)) {
+        Serial.println("[Update] Starting OTA update...");
+
+        size_t written = Update.writeStream(*stream);
+        Serial.printf("[Update] Written: %d bytes\n", written);
+
+        if (Update.end()) {
+          if (Update.isFinished()) {
+            Serial.println("[Update] Update successful! Rebooting...");
+            fill_solid(leds, NUM_LEDS, CRGB::Green);
+            FastLED.show();
+            delay(1000);
+            ESP.restart();
+          } else {
+            Serial.println("[Update] Update not finished");
+          }
+        } else {
+          Serial.printf("[Update] Update error: %s\n", Update.errorString());
+        }
+      } else {
+        Serial.printf("[Update] Not enough space: %s\n", Update.errorString());
+      }
+    }
+  } else {
+    Serial.printf("[Update] Download failed: %d\n", httpCode);
+  }
+
+  http.end();
+  updateInProgress = false;
+
+  // Restore LED state on failure
+  fill_solid(leds, NUM_LEDS, CRGB::Red);
+  FastLED.show();
+  delay(1000);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+}
+
 // LED test routine - cycles through R/G/B
 void testLED() {
   FastLED.setBrightness(maxBrightness);
@@ -714,6 +883,11 @@ String getConfigPage() {
   if (ap_mode) {
     html += "<div class=\"status-item\"><span>AP SSID:</span><span>" + apSSID + "</span></div>";
   }
+  html += "<div class=\"status-item\"><span>Firmware:</span><span id=\"fwVersion\">" + String(FIRMWARE_VERSION) + "</span>";
+  html += "<button type=\"button\" onclick=\"checkUpdate()\" style=\"margin-left:10px;padding:2px 8px;font-size:12px;cursor:pointer\">Check</button></div>";
+  html += "<div class=\"status-item\" id=\"updateNotice\" style=\"display:none\"><span style=\"color:#ff6b6b\">Update Available:</span>";
+  html += "<span id=\"latestVersion\" style=\"color:#ff6b6b\"></span>";
+  html += "<button type=\"button\" onclick=\"installUpdate()\" style=\"margin-left:10px;padding:2px 8px;font-size:12px;background:#4CAF50;color:white;border:none;border-radius:3px;cursor:pointer\">Install</button></div>";
   html += "</div>";
 
   // Test Tally buttons (momentary - on while pressed)
@@ -845,6 +1019,20 @@ String getConfigPage() {
   html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/test?state='+state).catch(function(){});});";
   html += "fetch('/test?state='+state);}";
   html += "function resetDefaults(){if(confirm('Reset all settings to factory defaults?\\n\\nThis will erase all configuration and reboot the device.')){window.location.href='/reset';}}";
+  // Firmware update functions
+  html += "function checkUpdate(){";
+  html += "document.getElementById('updateNotice').style.display='none';";
+  html += "fetch('/api/check-update').then(r=>r.json()).then(d=>{";
+  html += "document.getElementById('fwVersion').textContent=d.current;";
+  html += "if(d.updateAvailable){";
+  html += "document.getElementById('updateNotice').style.display='block';";
+  html += "document.getElementById('latestVersion').textContent=d.latest;";
+  html += "}else{alert('Firmware is up to date ('+d.current+')');}";
+  html += "}).catch(function(e){alert('Failed to check for updates');});}";
+  html += "function installUpdate(){";
+  html += "if(confirm('Install firmware update?\\n\\nThe device will download the new firmware and reboot.')){";
+  html += "alert('Starting update... The device will reboot when complete.');";
+  html += "fetch('/api/update').catch(function(){});}}";
   // Secret disco mode - type 'disco' anywhere to trigger
   html += "var discoBuffer='';var discoTimer=null;";
   html += "document.addEventListener('keydown',function(e){";
@@ -870,6 +1058,7 @@ String getConfigPage() {
   html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco-stop').catch(function(){});});";  // Stop all discovered devices
   html += "}";
   html += "toggleIPFields();toggleWifiFields();";
+  html += "discoverDevices();";  // Auto-discover devices on page load
   html += "setInterval(function(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.getElementById('tallyText').textContent=d.text||'-'});updateDeviceStatuses();},2000);";
   html += "</script></body></html>";
 
@@ -917,8 +1106,10 @@ void setupWebServer() {
 
   // Discover other tally devices on the network
   server.on("/discover", HTTP_GET, []() {
-    // Run discovery scan
-    discoverTallyDevices();
+    // Only rescan if cache is stale (> 10 seconds)
+    if (millis() - lastDiscoveryScan > 10000) {
+      discoverTallyDevices();
+    }
 
     // Build JSON array of discovered devices
     String json = "{\"devices\":[";
@@ -951,6 +1142,27 @@ void setupWebServer() {
 
     delay(1000);
     ESP.restart();
+  });
+
+  // Check for firmware updates
+  server.on("/api/check-update", HTTP_GET, []() {
+    checkForUpdates();
+    String json = "{\"current\":\"" + String(FIRMWARE_VERSION) + "\",";
+    json += "\"latest\":\"" + latestVersion + "\",";
+    json += "\"updateAvailable\":" + String(updateAvailable ? "true" : "false") + ",";
+    json += "\"firmwareURL\":\"" + firmwareURL + "\"}";
+    server.send(200, "application/json", json);
+  });
+
+  // Perform firmware update from GitHub
+  server.on("/api/update", HTTP_GET, []() {
+    if (!updateAvailable || firmwareURL.length() == 0) {
+      server.send(400, "application/json", "{\"error\":\"No update available\"}");
+      return;
+    }
+    server.send(200, "application/json", "{\"status\":\"starting\",\"message\":\"Downloading update...\"}");
+    delay(100);  // Give time for response to send
+    performOTAUpdate();
   });
 
   // Secret disco mode endpoint
@@ -1252,5 +1464,18 @@ void loop() {
 
   // Handle web server requests
   server.handleClient();
+
+  // Handle OTA updates
+  ArduinoOTA.handle();
+
+  // Periodic background device discovery (every 60 seconds)
+  static unsigned long lastAutoDiscovery = 0;
+  if ((eth_connected || wifi_connected) && !ap_mode) {
+    if (millis() - lastAutoDiscovery > 60000) {
+      lastAutoDiscovery = millis();
+      discoverTallyDevices();
+    }
+  }
+
   delay(10);
 }
