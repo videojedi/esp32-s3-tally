@@ -14,7 +14,7 @@
 #define DATA_PIN 16
 #define RESET_BUTTON_PIN 0  // GPIO 0 (BOOT button) for factory reset
 #define WIFI_CONNECT_TIMEOUT 10000  // 10 seconds to connect to WiFi
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.2"
 #define MAX_DISCOVERED_DEVICES 16
 
 // W5500 SPI Ethernet configuration - MUST be defined BEFORE including ETH.h
