@@ -35,6 +35,7 @@
 #include <ESPmDNS.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Update.h>
 
 // GitHub OTA Update configuration
@@ -675,10 +676,14 @@ void checkForUpdates() {
 
   Serial.println("[Update] Checking GitHub for updates...");
 
+  // Use WiFiClientSecure for HTTPS
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip certificate verification
+
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(10000);
-  http.begin(GITHUB_API_URL);
+  http.begin(client, GITHUB_API_URL);
   http.addHeader("User-Agent", "ESP32-Tally-OTA");
   http.addHeader("Accept", "application/vnd.github.v3+json");
 
@@ -749,11 +754,16 @@ void performOTAUpdate() {
   fill_solid(leds, NUM_LEDS, CRGB::Purple);
   FastLED.show();
 
+  // Use WiFiClientSecure for HTTPS
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip certificate verification for GitHub
+
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(30000);
-  http.begin(firmwareURL);
+  http.setTimeout(60000);  // 60 second timeout for large downloads
+  http.begin(client, firmwareURL);
 
+  Serial.println("[Update] Starting download...");
   int httpCode = http.GET();
   Serial.printf("[Update] Download response: %d\n", httpCode);
 
@@ -762,12 +772,10 @@ void performOTAUpdate() {
     Serial.printf("[Update] Firmware size: %d bytes\n", contentLength);
 
     if (contentLength > 0) {
-      WiFiClient* stream = http.getStreamPtr();
-
       if (Update.begin(contentLength)) {
-        Serial.println("[Update] Starting OTA update...");
+        Serial.println("[Update] Starting OTA flash...");
 
-        size_t written = Update.writeStream(*stream);
+        size_t written = Update.writeStream(client);
         Serial.printf("[Update] Written: %d bytes\n", written);
 
         if (Update.end()) {
@@ -786,6 +794,8 @@ void performOTAUpdate() {
       } else {
         Serial.printf("[Update] Not enough space: %s\n", Update.errorString());
       }
+    } else {
+      Serial.println("[Update] Invalid content length");
     }
   } else {
     Serial.printf("[Update] Download failed: %d\n", httpCode);
@@ -797,7 +807,7 @@ void performOTAUpdate() {
   // Restore LED state on failure
   fill_solid(leds, NUM_LEDS, CRGB::Red);
   FastLED.show();
-  delay(1000);
+  delay(2000);
   fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.show();
 }
