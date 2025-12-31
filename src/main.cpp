@@ -894,7 +894,7 @@ String getConfigPage() {
     html += "<div class=\"status-item\"><span>AP SSID:</span><span>" + apSSID + "</span></div>";
   }
   html += "<div class=\"status-item\"><span>Firmware:</span><span id=\"fwVersion\">" + String(FIRMWARE_VERSION) + "</span>";
-  html += "<button type=\"button\" onclick=\"checkUpdate()\" style=\"margin-left:10px;padding:2px 8px;font-size:12px;cursor:pointer\">Check</button></div>";
+  html += "<button type=\"button\" onclick=\"checkUpdate()\" style=\"width:auto;margin-left:10px;margin-top:0;padding:4px 12px;font-size:11px;cursor:pointer\">Check</button></div>";
   html += "<div class=\"status-item\" id=\"updateNotice\" style=\"display:none\"><span style=\"color:#ff6b6b\">Update Available:</span>";
   html += "<span id=\"latestVersion\" style=\"color:#ff6b6b\"></span>";
   html += "<button type=\"button\" onclick=\"installUpdate()\" style=\"margin-left:10px;padding:2px 8px;font-size:12px;background:#4CAF50;color:white;border:none;border-radius:3px;cursor:pointer\">Install</button></div>";
@@ -1041,7 +1041,7 @@ String getConfigPage() {
   html += "}).catch(function(e){alert('Failed to check for updates');});}";
   html += "function installUpdate(){";
   html += "if(confirm('Install firmware update?\\n\\nThe device will download the new firmware and reboot.')){";
-  html += "alert('Starting update... The device will reboot when complete.');";
+  html += "document.getElementById('updateNotice').innerHTML='<span style=\\\"color:#ff6b6b\\\">Updating... Please wait, device will reboot</span>';";
   html += "fetch('/api/update').catch(function(){});}}";
   // Secret disco mode - type 'disco' anywhere to trigger
   html += "var discoBuffer='';var discoTimer=null;";
