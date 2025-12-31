@@ -15,7 +15,7 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 - **Captive Portal** - Automatic configuration page popup in AP mode
 - **Unique Device Identity** - Each device gets a unique hostname based on MAC address
 - **mDNS Support** - Access via hostname.local (e.g., `http://Tally-AABBCC.local`)
-- **OTA Updates** - Over-the-air firmware updates
+- **OTA Updates** - Over-the-air firmware updates via PlatformIO or GitHub releases
 - **Persistent Settings** - Configuration stored in NVS flash
 - **Factory Reset** - Hold BOOT button for 3 seconds, or use web interface button
 
@@ -177,6 +177,8 @@ The device listens for TSL 3.1 UMD protocol messages on the configured multicast
 | `/info` | GET | JSON device info (hostname, MAC, TSL address, firmware) |
 | `/test?state=N` | GET | Set tally state (0-3) |
 | `/discover` | GET | Scan network and return found tally devices |
+| `/api/check-update` | GET | Check GitHub for firmware updates |
+| `/api/update` | GET | Download and install firmware from GitHub |
 | `/save` | POST | Save settings and reboot |
 | `/reset` | GET | Factory reset and reboot |
 
@@ -222,11 +224,24 @@ The device listens for TSL 3.1 UMD protocol messages on the configured multicast
 
 OTA is enabled when connected via Ethernet or WiFi (not in AP mode).
 
+### GitHub Release Updates (Recommended)
+
+Devices can check for and install updates directly from GitHub releases:
+
+1. Open device web interface
+2. Click **Check** next to Firmware version
+3. If update available, click **Install**
+4. Device downloads firmware and reboots automatically
+
+### PlatformIO OTA
+
+For development or manual updates:
+
 - Hostname: Configured device hostname
 - Password: `password`
 - Port: Default (3232)
 
-### Single Device Update
+#### Single Device Update
 
 ```bash
 # Set target IP and upload
@@ -236,7 +251,7 @@ TALLY_IP=192.168.1.100 pio run -t upload -e ota
 TALLY_IP=Tally-AABBCC.local pio run -t upload -e ota
 ```
 
-### Bulk Update All Devices
+#### Bulk Update All Devices
 
 Use the included script to update all tally lights on the network:
 
@@ -251,6 +266,21 @@ The script will:
 3. Show the device list and ask for confirmation
 4. Update each device via OTA
 5. Report success/failure summary
+
+### Creating Releases
+
+Use the release script to create a new GitHub release with firmware:
+
+```bash
+./release.sh 1.0.3
+```
+
+This will:
+1. Update FIRMWARE_VERSION in source
+2. Build the firmware
+3. Commit and tag the release
+4. Push to GitHub
+5. Create GitHub release with firmware.bin attached
 
 ## Factory Reset
 

@@ -7,7 +7,17 @@
       "Bash(lsof:*)",
       "Bash(git push)",
       "Bash(git push:*)",
-      "Bash(git fetch:*)"
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd multi-device discovery, captive portal, and unique device IDs\n\n- Multi-device discovery via mDNS with Network Devices section in web UI\n- Bulk control buttons to test all devices simultaneously\n- Captive portal for automatic config page popup in AP mode\n- Unique hostnames and AP SSIDs based on ESP32 chip ID\n- Web interface factory reset button with confirmation\n- New API endpoints: /info, /discover, /reset\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "Bash(chmod:*)",
+      "Bash(curl:*)",
+      "Bash(gh repo edit:*)",
+      "Bash(python3:*)",
+      "Bash(TALLY_IP=192.168.9.183 /Users/richard/Library/Python/3.10/bin/pio run:*)",
+      "Bash(./release.sh:*)",
+      "Bash(cat:*)"
     ]
   }
 }
