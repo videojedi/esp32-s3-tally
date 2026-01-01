@@ -621,6 +621,17 @@ void discoverTallyDevices() {
       continue;
     }
 
+    // Skip duplicates (same IP already in list)
+    bool isDuplicate = false;
+    for (int j = 0; j < numDiscoveredDevices; j++) {
+      if (discoveredDevices[j].ip == foundIP) {
+        Serial.printf("[Discovery] Skipping duplicate: %s\n", foundIP.c_str());
+        isDuplicate = true;
+        break;
+      }
+    }
+    if (isDuplicate) continue;
+
     discoveredDevices[numDiscoveredDevices].hostname = MDNS.hostname(i);
     discoveredDevices[numDiscoveredDevices].ip = foundIP;
     discoveredDevices[numDiscoveredDevices].lastSeen = millis();
@@ -1050,16 +1061,16 @@ String getConfigPage() {
   html += "if(discoBuffer==='disco'){startDisco();}});";
   html += "function startDisco(){";
   html += "document.getElementById('discoOverlay').classList.add('active');";  // Show overlay
-  html += "fetch('/disco?duration=10');";  // Trigger local device immediately
+  html += "fetch('/disco?duration=30');";  // Trigger local device immediately
   // If devices already discovered, use them; otherwise scan first
   html += "if(devices.length>0){";
-  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=10').catch(function(){});});";
+  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=30').catch(function(){});});";
   html += "}else{";
   html += "fetch('/discover').then(r=>r.json()).then(d=>{";
   html += "devices=d.devices;";
-  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=10').catch(function(){});});";
+  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=30').catch(function(){});});";
   html += "}).catch(function(){});}";
-  html += "discoTimer=setTimeout(function(){document.getElementById('discoOverlay').classList.remove('active');},10000);";  // Auto-hide after 10s
+  html += "discoTimer=setTimeout(function(){document.getElementById('discoOverlay').classList.remove('active');},30000);";  // Auto-hide after 30s
   html += "console.log('DISCO MODE!');}";
   html += "function stopDisco(){";
   html += "if(discoTimer){clearTimeout(discoTimer);}";
@@ -1082,23 +1093,25 @@ void setupWebServer() {
     server.send(200, "text/html", getConfigPage());
   });
 
-  // Status endpoint (JSON)
+  // Status endpoint (JSON) - with CORS for cross-device polling
   server.on("/status", HTTP_GET, []() {
     String json = "{\"tally\":\"" + currentTallyState + "\",\"text\":\"" + currentTallyText + "\",\"ip\":\"" + getActiveIP() + "\",\"connection\":\"" + getConnectionStatus() + "\"}";
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
   });
 
-  // Test tally endpoint
+  // Test tally endpoint - with CORS for cross-device control
   server.on("/test", HTTP_GET, []() {
     if (server.hasArg("state")) {
       int state = server.arg("state").toInt();
       setTallyState(state);
     }
     String json = "{\"tally\":\"" + currentTallyState + "\"}";
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
   });
 
-  // Device info endpoint (for multi-device discovery)
+  // Device info endpoint (for multi-device discovery) - with CORS
   server.on("/info", HTTP_GET, []() {
     String mac = eth_connected ? ETH.macAddress() : WiFi.macAddress();
     String json = "{";
@@ -1111,6 +1124,7 @@ void setupWebServer() {
     json += "\"connection\":\"" + getConnectionStatus() + "\",";
     json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\"";
     json += "}";
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
   });
 
@@ -1175,19 +1189,20 @@ void setupWebServer() {
     performOTAUpdate();
   });
 
-  // Secret disco mode endpoint
+  // Secret disco mode endpoint - with CORS for cross-device sync
   server.on("/disco", HTTP_GET, []() {
-    int duration = 10;  // Default 10 seconds
+    int duration = 30;  // Default 30 seconds
     if (server.hasArg("duration")) {
-      duration = constrain(server.arg("duration").toInt(), 1, 60);
+      duration = constrain(server.arg("duration").toInt(), 1, 120);
     }
     discoMode = true;
     discoEndTime = millis() + (duration * 1000);
     Serial.printf("[DISCO] Party mode activated for %d seconds!\n", duration);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", "{\"disco\":true,\"duration\":" + String(duration) + "}");
   });
 
-  // Stop disco mode
+  // Stop disco mode - with CORS for cross-device sync
   server.on("/disco-stop", HTTP_GET, []() {
     discoMode = false;
     Serial.println("[DISCO] Party stopped by request!");
@@ -1195,6 +1210,7 @@ void setupWebServer() {
     setTallyState(currentTallyState == "Green" ? 1 :
                   currentTallyState == "Red" ? 2 :
                   currentTallyState == "Yellow" ? 3 : 0);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", "{\"disco\":false}");
   });
 

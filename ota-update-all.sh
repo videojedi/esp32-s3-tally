@@ -19,7 +19,7 @@ echo ""
 # Build firmware first
 echo "Building firmware..."
 cd "$SCRIPT_DIR"
-$PIO run -e esp32-s3 -s
+$PIO run -e esp32-s3 -s 2>/dev/null
 echo "Build complete."
 echo ""
 
@@ -36,26 +36,16 @@ for d in data.get('devices', []):
     print(d['ip'])
 " 2>/dev/null)
 else
-    # Use mDNS to discover devices
-    echo "Discovering tally devices via mDNS..."
-    DEVICES=$(dns-sd -B _tally._tcp local 2>/dev/null &
-    sleep 3
-    kill $! 2>/dev/null
-    dns-sd -L "Tally" _tally._tcp local 2>/dev/null &
-    sleep 2
-    kill $! 2>/dev/null) || true
-
-    # Fallback: try avahi-browse on Linux
-    if [ -z "$DEVICES" ] && command -v avahi-browse &>/dev/null; then
-        DEVICES=$(avahi-browse -rpt _tally._tcp 2>/dev/null | grep "=" | cut -d';' -f8 | sort -u)
-    fi
-
-    # If still nothing, prompt user
-    if [ -z "$DEVICES" ]; then
-        echo "Could not auto-discover devices."
-        echo "Please provide a known device IP: ./ota-update-all.sh 192.168.1.100"
-        exit 1
-    fi
+    # mDNS discovery without a known device IP is unreliable
+    # Recommend providing an IP instead
+    echo "No device IP provided."
+    echo ""
+    echo "Usage: ./ota-update-all.sh <known-device-ip>"
+    echo ""
+    echo "Example: ./ota-update-all.sh 192.168.1.100"
+    echo ""
+    echo "The script will query that device to discover all other tally lights on the network."
+    exit 1
 fi
 
 # Convert to array and count
@@ -95,7 +85,7 @@ for ip in "${DEVICE_ARRAY[@]}"; do
 
     echo "Updating $HOSTNAME ($ip)..."
 
-    if TALLY_IP="$ip" $PIO run -t upload -e ota -s 2>&1; then
+    if TALLY_IP="$ip" $PIO run -t upload -e ota -s 2>/dev/null; then
         echo "  ✓ $HOSTNAME updated successfully"
         ((SUCCESS++))
     else
