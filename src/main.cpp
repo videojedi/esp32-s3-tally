@@ -488,8 +488,10 @@ void udpTSL(char *data) {
   if (tslAddress == addr) {
     T = message[1] & 0b00001111;
 
-    for (int j = 2; j < 17; j++) {
-      text += message[j];
+    for (int j = 2; j < 18; j++) {
+      char c = message[j];
+      if (c == '\0') break;  // Stop at null terminator
+      if (c >= 32 && c < 127) text += c;  // Only printable ASCII
     }
     text.trim();  // Remove trailing spaces
     currentTallyText = text;
@@ -1080,7 +1082,10 @@ String getConfigPage() {
   html += "}";
   html += "toggleIPFields();toggleWifiFields();";
   html += "discoverDevices();";  // Auto-discover devices on page load
-  html += "setInterval(function(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.getElementById('tallyText').textContent=d.text||'-'});updateDeviceStatuses();},2000);";
+  html += "function updateStatus(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.getElementById('tallyText').textContent=d.text||'-';}).catch(e=>{});}";
+  html += "updateStatus();";
+  html += "setInterval(updateStatus,2000);";
+  html += "setInterval(updateDeviceStatuses,5000);";
   html += "</script></body></html>";
 
   return html;
