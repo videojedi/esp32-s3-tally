@@ -14,7 +14,7 @@
 #define DATA_PIN 16
 #define RESET_BUTTON_PIN 0  // GPIO 0 (BOOT button) for factory reset
 #define WIFI_CONNECT_TIMEOUT 10000  // 10 seconds to connect to WiFi
-#define FIRMWARE_VERSION "1.0.5"
+#define FIRMWARE_VERSION "1.0.6"
 #define MAX_DISCOVERED_DEVICES 16
 
 // W5500 SPI Ethernet configuration - MUST be defined BEFORE including ETH.h
@@ -848,7 +848,8 @@ String getConfigPage() {
   html += "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23ff0000'/></svg>\">";
   html += "<title>TSL Tally Configuration</title>";
   html += "<style>";
-  html += "body{font-family:Arial,sans-serif;margin:20px;background:#1a1a2e;color:#eee}";
+  html += "body{font-family:Arial,sans-serif;margin:20px;background:#1a1a2e;color:#eee;transition:background-color 0.3s}";
+  html += "body.tally-off{background:#1a1a2e}body.tally-green{background:#0a3d0a}body.tally-red{background:#4d0000}body.tally-yellow{background:#4d4d00}";
   html += ".container{max-width:500px;margin:0 auto}";
   html += "h1{color:#00d4ff;text-align:center}";
   html += ".card{background:#16213e;padding:20px;border-radius:10px;margin-bottom:20px}";
@@ -1011,8 +1012,8 @@ String getConfigPage() {
   html += "<script>";
   html += "function toggleIPFields(){var d=document.getElementById('dhcp').value;var f=document.getElementById('ipFields');if(d==='0'){f.classList.add('show')}else{f.classList.remove('show')}}";
   html += "function toggleWifiFields(){var w=document.getElementById('wifiEn').value;var f=document.getElementById('wifiFields');if(w==='1'){f.classList.add('show')}else{f.classList.remove('show')}}";
-  html += "function testOn(s){fetch('/test?state='+s).then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase()})}";
-  html += "function testOff(){fetch('/test?state=0').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase()})}";
+  html += "function testOn(s){fetch('/test?state='+s).then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.body.className='tally-'+d.tally.toLowerCase();})}";
+  html += "function testOff(){fetch('/test?state=0').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.body.className='tally-'+d.tally.toLowerCase();})}";
   html += "var devices=[];";
   html += "function discoverDevices(){";
   html += "document.getElementById('deviceList').innerHTML='<p class=\"no-devices\">Scanning...</p>';";
@@ -1082,7 +1083,7 @@ String getConfigPage() {
   html += "}";
   html += "toggleIPFields();toggleWifiFields();";
   html += "discoverDevices();";  // Auto-discover devices on page load
-  html += "function updateStatus(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.getElementById('tallyText').textContent=d.text||'-';}).catch(e=>{});}";
+  html += "function updateStatus(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.getElementById('tallyText').textContent=d.text||'-';document.body.className='tally-'+d.tally.toLowerCase();}).catch(e=>{});}";
   html += "updateStatus();";
   html += "setInterval(updateStatus,2000);";
   html += "setInterval(updateDeviceStatuses,5000);";
