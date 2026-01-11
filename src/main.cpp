@@ -14,7 +14,7 @@
 #define DATA_PIN 16
 #define RESET_BUTTON_PIN 0  // GPIO 0 (BOOT button) for factory reset
 #define WIFI_CONNECT_TIMEOUT 10000  // 10 seconds to connect to WiFi
-#define FIRMWARE_VERSION "1.0.6"
+#define FIRMWARE_VERSION "1.0.7"
 #define MAX_DISCOVERED_DEVICES 16
 
 // W5500 SPI Ethernet configuration - MUST be defined BEFORE including ETH.h
@@ -998,7 +998,7 @@ String getConfigPage() {
   html += "</div>";
   html += "</form>";
   html += "<footer style=\"text-align:center;margin-top:30px;padding:20px;color:#666;font-size:12px\">";
-  html += "&copy; 2025 <a href=\"https://videowalrus.com\" style=\"color:#00d4ff\">Video Walrus</a>";
+  html += "&copy; 2026 <a href=\"https://videowalrus.com\" style=\"color:#00d4ff\">Video Walrus</a>";
   html += "</footer>";
   html += "</div>";
 
@@ -1376,11 +1376,14 @@ void setup() {
     unsigned long ethStartTime = millis();
     while (!eth_connected && millis() - ethStartTime < 10000) {  // 10 second timeout
       yield();  // Feed the watchdog
-      delay(100);
-      // Blink green while waiting for Ethernet
-      fill_solid(leds, NUM_LEDS, ((millis() / 300) % 2) ? CRGB::Green : CRGB::Black);
+      delay(20);
+      // Pulse orange while waiting for Ethernet
+      uint8_t brightness = (sin8(millis() / 4) * maxBrightness) / 255;
+      fill_solid(leds, NUM_LEDS, CRGB::Orange);
+      FastLED.setBrightness(brightness);
       FastLED.show();
     }
+    FastLED.setBrightness(maxBrightness);  // Restore brightness
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
     Serial.printf("Ethernet wait complete. Connected: %s\n", eth_connected ? "YES" : "NO");
