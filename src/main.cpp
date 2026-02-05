@@ -1344,17 +1344,6 @@ void setup() {
 
   Network.onEvent(onEvent);
 
-  // Configure static IP if not using DHCP (for Ethernet)
-  if (!useDHCP) {
-    IPAddress ip, gw, sn, dnsServer;
-    ip.fromString(staticIP);
-    gw.fromString(gateway);
-    sn.fromString(subnet);
-    dnsServer.fromString(dns);
-    ETH.config(ip, gw, sn, dnsServer);
-    Serial.println("Using static IP configuration for Ethernet");
-  }
-
   // Try Ethernet first
   Serial.println("Starting Ethernet...");
 
@@ -1371,6 +1360,18 @@ void setup() {
   Serial.printf("ETH.begin() returned: %s\n", ethStarted ? "true" : "false");
 
   if (ethStarted) {
+    // Configure static IP immediately after begin (must be after begin but before DHCP starts)
+    if (!useDHCP) {
+      IPAddress ip, gw, sn, dnsServer;
+      ip.fromString(staticIP);
+      gw.fromString(gateway);
+      sn.fromString(subnet);
+      dnsServer.fromString(dns);
+      Serial.println("Configuring static IP...");
+      ETH.config(ip, gw, sn, dnsServer);
+      Serial.println("Static IP configured");
+    }
+
     // Wait for Ethernet with timeout, feeding watchdog
     Serial.println("Waiting for Ethernet connection...");
     unsigned long ethStartTime = millis();
