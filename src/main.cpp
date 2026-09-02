@@ -64,6 +64,8 @@ void startMDNS();
 void testLED();
 void discoverTallyDevices();
 String getDefaultHostname();
+String htmlEscape(const String& s);
+String jsonEscape(const String& s);
 
 // Web server
 WebServer server(80);
@@ -486,7 +488,10 @@ void udpTSL(char *data) {
   addr = message[0] - 128;
 
   if (tslAddress == addr) {
-    T = message[1] & 0b00001111;
+    // Control byte bits: 0 = tally 1, 1 = tally 2, 2 = tally 3, 3 = tally 4, 4-5 = brightness.
+    // Only tally 1/2 drive the light; masking to 4 bits let tally 3/4 push T out of
+    // range (4-15), which setTallyState() treats as Off.
+    T = message[1] & 0b00000011;
 
     for (int j = 2; j < 18; j++) {
       char c = message[j];
@@ -841,6 +846,49 @@ void testLED() {
   FastLED.show();
 }
 
+// Escape a string for safe insertion into HTML text or attribute values
+String htmlEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '&':  out += "&amp;"; break;
+      case '<':  out += "&lt;"; break;
+      case '>':  out += "&gt;"; break;
+      case '"':  out += "&quot;"; break;
+      case '\'': out += "&#39;"; break;
+      default:   out += c;
+    }
+  }
+  return out;
+}
+
+// Escape a string for safe insertion into a JSON string literal
+String jsonEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if ((unsigned char)c < 0x20) {
+          char buf[7];
+          snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
 // HTML page for configuration
 String getConfigPage() {
   String html = "<!DOCTYPE html><html><head>";
@@ -854,9 +902,10 @@ String getConfigPage() {
   html += "h1{color:#00d4ff;text-align:center}";
   html += ".card{background:#16213e;padding:20px;border-radius:10px;margin-bottom:20px}";
   html += ".card h2{margin-top:0;color:#00d4ff;border-bottom:1px solid #0f3460;padding-bottom:10px}";
-  html += "label{display:block;margin:10px 0 5px;font-weight:bold}";
-  html += "input[type=text],input[type=number],input[type=password],select{width:100%;padding:10px;border:1px solid #0f3460;border-radius:5px;background:#0f3460;color:#eee;box-sizing:border-box}";
+  html += "label{display:block;width:fit-content;margin:10px 0 5px;font-weight:bold}";
+  html += "input[type=text],input[type=number],input[type=password],select{width:100%;padding:10px;border:1px solid #0f3460;border-radius:5px;background:#0f3460;color:#eee;box-sizing:border-box;font-size:16px}";
   html += "input:focus,select:focus{outline:none;border-color:#00d4ff}";
+  html += ".masked{-webkit-text-security:disc}";
   html += ".ip-fields,.wifi-fields{display:none}.ip-fields.show,.wifi-fields.show{display:block}";
   html += "button{width:100%;padding:15px;background:#00d4ff;color:#1a1a2e;border:none;border-radius:5px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:20px}";
   html += "button:hover{background:#00b4d8}";
@@ -897,7 +946,7 @@ String getConfigPage() {
   html += "<div class=\"status-item\"><span>Connection:</span><span>" + getConnectionStatus() + "</span></div>";
   html += "<div class=\"status-item\"><span>IP Address:</span><span id=\"currentIP\">" + getActiveIP() + "</span></div>";
   html += "<div class=\"status-item\"><span>Tally State:</span><span id=\"tallyState\" class=\"tally-" + currentTallyState + "\">" + currentTallyState + "</span></div>";
-  html += "<div class=\"status-item\"><span>TSL Text:</span><span id=\"tallyText\">" + (currentTallyText.length() > 0 ? currentTallyText : "-") + "</span></div>";
+  html += "<div class=\"status-item\"><span>TSL Text:</span><span id=\"tallyText\">" + (currentTallyText.length() > 0 ? htmlEscape(currentTallyText) : String("-")) + "</span></div>";
   if (eth_connected) {
     html += "<div class=\"status-item\"><span>ETH MAC:</span><span>" + ETH.macAddress() + "</span></div>";
   }
@@ -918,9 +967,9 @@ String getConfigPage() {
   html += "<div class=\"card\"><h2>Test Tally</h2>";
   html += "<p class=\"note\">Hold button to test - releases to off</p>";
   html += "<div class=\"test-btns\">";
-  html += "<button type=\"button\" class=\"test-btn btn-green\" onmousedown=\"testOn(1)\" onmouseup=\"testOff()\" ontouchstart=\"testOn(1)\" ontouchend=\"testOff()\">GREEN</button>";
-  html += "<button type=\"button\" class=\"test-btn btn-red\" onmousedown=\"testOn(2)\" onmouseup=\"testOff()\" ontouchstart=\"testOn(2)\" ontouchend=\"testOff()\">RED</button>";
-  html += "<button type=\"button\" class=\"test-btn btn-yellow\" onmousedown=\"testOn(3)\" onmouseup=\"testOff()\" ontouchstart=\"testOn(3)\" ontouchend=\"testOff()\">YELLOW</button>";
+  html += "<button type=\"button\" class=\"test-btn btn-green\" onmousedown=\"testOn(1)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(1)\" ontouchend=\"event.preventDefault();testOff()\">GREEN</button>";
+  html += "<button type=\"button\" class=\"test-btn btn-red\" onmousedown=\"testOn(2)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(2)\" ontouchend=\"event.preventDefault();testOff()\">RED</button>";
+  html += "<button type=\"button\" class=\"test-btn btn-yellow\" onmousedown=\"testOn(3)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(3)\" ontouchend=\"event.preventDefault();testOff()\">YELLOW</button>";
   html += "</div></div>";
 
   // Network Devices section
@@ -937,17 +986,21 @@ String getConfigPage() {
 
   // Form
   html += "<form action=\"/save\" method=\"POST\">";
+  // In AP mode every input starts readonly. WebKit's form classification (which the iOS
+  // Captive Network Assistant uses to pick a field to auto-focus) skips readonly fields,
+  // and iOS shows no keyboard for one. The script below clears readonly on a real tap or key.
+  String ro = ap_mode ? " readonly" : "";
 
   // TSL Settings
   html += "<div class=\"card\"><h2>TSL Settings</h2>";
   html += "<label for=\"tslAddr\">TSL Address (0-126)</label>";
-  html += "<input type=\"number\" id=\"tslAddr\" name=\"tslAddr\" min=\"0\" max=\"126\" value=\"" + String(tslAddress) + "\" required>";
+  html += "<input type=\"number\" id=\"tslAddr\" name=\"tslAddr\" min=\"0\" max=\"126\" value=\"" + String(tslAddress) + "\" required" + ro + ">";
   html += "<label for=\"tslMcast\">Multicast Address</label>";
-  html += "<input type=\"text\" id=\"tslMcast\" name=\"tslMcast\" value=\"" + tslMulticast + "\" required>";
+  html += "<input type=\"text\" id=\"tslMcast\" name=\"tslMcast\" value=\"" + htmlEscape(tslMulticast) + "\" required" + ro + ">";
   html += "<label for=\"tslPort\">TSL Port</label>";
-  html += "<input type=\"number\" id=\"tslPort\" name=\"tslPort\" min=\"1\" max=\"65535\" value=\"" + String(tslPort) + "\" required>";
+  html += "<input type=\"number\" id=\"tslPort\" name=\"tslPort\" min=\"1\" max=\"65535\" value=\"" + String(tslPort) + "\" required" + ro + ">";
   html += "<label for=\"maxBright\">Max Brightness (1-255)</label>";
-  html += "<input type=\"number\" id=\"maxBright\" name=\"maxBright\" min=\"1\" max=\"255\" value=\"" + String(maxBrightness) + "\" required>";
+  html += "<input type=\"number\" id=\"maxBright\" name=\"maxBright\" min=\"1\" max=\"255\" value=\"" + String(maxBrightness) + "\" required" + ro + ">";
   html += "<p class=\"note\">TSL brightness (0-3) maps to 0 - max brightness</p>";
   html += "</div>";
 
@@ -961,9 +1014,16 @@ String getConfigPage() {
 
   html += "<div id=\"wifiFields\" class=\"wifi-fields\">";
   html += "<label for=\"wifiSSID\">WiFi SSID</label>";
-  html += "<input type=\"text\" id=\"wifiSSID\" name=\"wifiSSID\" value=\"" + wifiSSID + "\" maxlength=\"32\">";
+  html += "<input type=\"text\" id=\"wifiSSID\" name=\"wifiSSID\" value=\"" + htmlEscape(wifiSSID) + "\" maxlength=\"32\"" + ro + ">";
   html += "<label for=\"wifiPass\">WiFi Password</label>";
-  html += "<input type=\"password\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + wifiPassword + "\" maxlength=\"64\">";
+  // iOS Captive Network Assistant treats any form with a type=password input as a
+  // captive-portal login and auto-focuses the first text field (with keyboard).
+  // In AP mode serve a CSS-masked text input instead so the form is not a "login".
+  if (ap_mode) {
+    html += "<input type=\"text\" class=\"masked\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\" readonly>";
+  } else {
+    html += "<input type=\"password\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\">";
+  }
   html += "</div>";
   html += "<p class=\"note\">If WiFi fails, device will start an AP: " + apSSID + " (password: " + apPassword + ")</p>";
   html += "</div>";
@@ -971,7 +1031,7 @@ String getConfigPage() {
   // Ethernet/Network Settings
   html += "<div class=\"card\"><h2>Ethernet Settings</h2>";
   html += "<label for=\"hostname\">Hostname</label>";
-  html += "<input type=\"text\" id=\"hostname\" name=\"hostname\" value=\"" + deviceHostname + "\" maxlength=\"32\" required>";
+  html += "<input type=\"text\" id=\"hostname\" name=\"hostname\" value=\"" + htmlEscape(deviceHostname) + "\" maxlength=\"32\" required" + ro + ">";
 
   html += "<label for=\"dhcp\">IP Configuration</label>";
   html += "<select id=\"dhcp\" name=\"dhcp\" onchange=\"toggleIPFields()\">";
@@ -981,13 +1041,13 @@ String getConfigPage() {
 
   html += "<div id=\"ipFields\" class=\"ip-fields\">";
   html += "<label for=\"ip\">IP Address</label>";
-  html += "<input type=\"text\" id=\"ip\" name=\"ip\" value=\"" + staticIP + "\">";
+  html += "<input type=\"text\" id=\"ip\" name=\"ip\" value=\"" + htmlEscape(staticIP) + "\"" + ro + ">";
   html += "<label for=\"gw\">Gateway</label>";
-  html += "<input type=\"text\" id=\"gw\" name=\"gw\" value=\"" + gateway + "\">";
+  html += "<input type=\"text\" id=\"gw\" name=\"gw\" value=\"" + htmlEscape(gateway) + "\"" + ro + ">";
   html += "<label for=\"sn\">Subnet Mask</label>";
-  html += "<input type=\"text\" id=\"sn\" name=\"sn\" value=\"" + subnet + "\">";
+  html += "<input type=\"text\" id=\"sn\" name=\"sn\" value=\"" + htmlEscape(subnet) + "\"" + ro + ">";
   html += "<label for=\"dns\">DNS Server</label>";
-  html += "<input type=\"text\" id=\"dns\" name=\"dns\" value=\"" + dns + "\">";
+  html += "<input type=\"text\" id=\"dns\" name=\"dns\" value=\"" + htmlEscape(dns) + "\"" + ro + ">";
   html += "</div>";
   html += "<p class=\"note\">Device will reboot after saving settings.</p>";
   html += "</div>";
@@ -999,6 +1059,7 @@ String getConfigPage() {
   html += "</form>";
   html += "<footer style=\"text-align:center;margin-top:30px;padding:20px;color:#666;font-size:12px\">";
   html += "&copy; 2026 <a href=\"https://videowalrus.com\" style=\"color:#00d4ff\">Video Walrus</a>";
+  html += " &middot; build " __DATE__ " " __TIME__;
   html += "</footer>";
   html += "</div>";
 
@@ -1010,10 +1071,35 @@ String getConfigPage() {
 
   // JavaScript
   html += "<script>";
+  // Reject programmatic focus (iOS CNA auto-focus). A focus is accepted only if it
+  // follows a mousedown/keydown within 1s, or moves from another field (keyboard
+  // next/prev arrows, Tab). iOS scroll gestures emit no mousedown, so scrolling
+  // never opens the window. Accepted focus also clears the AP-mode readonly.
+  html += "var lastUser=0,lastTarget=null,roMode=" + String(ap_mode ? "true" : "false") + ";";
+  // Guard applies to text-entry fields only; selects open a picker without a mousedown
+  // on iOS and are never a CNA "username" candidate.
+  html += "function isField(t){return !!t&&/^(INPUT|TEXTAREA)$/.test(t.tagName);}";
+  html += "function isCtl(t){return !!t&&/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(t.tagName);}";
+  html += "function tapOn(t){if(!lastTarget||Date.now()-lastUser>1000)return false;";
+  html += "if(lastTarget===t)return true;var l=lastTarget.closest?lastTarget.closest('label'):null;";
+  html += "return !!l&&(l.htmlFor===t.id||l.contains(t));}";
+  html += "document.addEventListener('mousedown',function(e){lastUser=Date.now();lastTarget=e.target;";
+  html += "if(isField(e.target)&&e.target.readOnly)e.target.readOnly=false;},true);";
+  html += "document.addEventListener('keydown',function(){lastUser=Date.now();lastTarget=null;},true);";
+  html += "document.addEventListener('focusin',function(e){var t=e.target;if(!isField(t))return;";
+  html += "var ok=isCtl(e.relatedTarget)||tapOn(t)||(!lastTarget&&Date.now()-lastUser<1000);";
+  html += "if(ok){if(t.readOnly)t.readOnly=false;}else{t.blur();}});";
+  html += "document.addEventListener('focusout',function(e){var t=e.target;";
+  html += "if(roMode&&isField(t))t.readOnly=true;});";
+  // Write tally state to the DOM only when it changed (each mutation can re-trigger the
+  // iOS CNA auto-focus scan).
+  html += "function applyTally(d){var s=d.tally,c='tally-'+s.toLowerCase();var el=document.getElementById('tallyState');";
+  html += "if(el.textContent!==s)el.textContent=s;if(el.className!==c)el.className=c;if(document.body.className!==c)document.body.className=c;";
+  html += "if('text' in d){var t=d.text||'-',tt=document.getElementById('tallyText');if(tt.textContent!==t)tt.textContent=t;}}";
   html += "function toggleIPFields(){var d=document.getElementById('dhcp').value;var f=document.getElementById('ipFields');if(d==='0'){f.classList.add('show')}else{f.classList.remove('show')}}";
   html += "function toggleWifiFields(){var w=document.getElementById('wifiEn').value;var f=document.getElementById('wifiFields');if(w==='1'){f.classList.add('show')}else{f.classList.remove('show')}}";
-  html += "function testOn(s){fetch('/test?state='+s).then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.body.className='tally-'+d.tally.toLowerCase();})}";
-  html += "function testOff(){fetch('/test?state=0').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.body.className='tally-'+d.tally.toLowerCase();})}";
+  html += "function testOn(s){fetch('/test?state='+s).then(r=>r.json()).then(applyTally).catch(e=>{})}";
+  html += "function testOff(){fetch('/test?state=0').then(r=>r.json()).then(applyTally).catch(e=>{})}";
   html += "var devices=[];";
   html += "function discoverDevices(){";
   html += "document.getElementById('deviceList').innerHTML='<p class=\"no-devices\">Scanning...</p>';";
@@ -1037,7 +1123,7 @@ String getConfigPage() {
   html += "devices.forEach(function(dev){";
   html += "fetch('http://'+dev.ip+'/status').then(r=>r.json()).then(d=>{";
   html += "var el=document.getElementById('status-'+dev.ip.replace(/\\./g,'-'));";
-  html += "if(el){el.className='device-status '+d.tally.toLowerCase();}";
+  html += "var c='device-status '+d.tally.toLowerCase();if(el&&el.className!==c){el.className=c;}";
   html += "}).catch(function(){});});}";
   html += "function bulkTest(state){";
   html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/test?state='+state).catch(function(){});});";
@@ -1083,7 +1169,7 @@ String getConfigPage() {
   html += "}";
   html += "toggleIPFields();toggleWifiFields();";
   html += "discoverDevices();";  // Auto-discover devices on page load
-  html += "function updateStatus(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('tallyState').textContent=d.tally;document.getElementById('tallyState').className='tally-'+d.tally.toLowerCase();document.getElementById('tallyText').textContent=d.text||'-';document.body.className='tally-'+d.tally.toLowerCase();}).catch(e=>{});}";
+  html += "function updateStatus(){fetch('/status').then(r=>r.json()).then(applyTally).catch(e=>{});}";
   html += "updateStatus();";
   html += "setInterval(updateStatus,2000);";
   html += "setInterval(updateDeviceStatuses,5000);";
@@ -1101,7 +1187,7 @@ void setupWebServer() {
 
   // Status endpoint (JSON) - with CORS for cross-device polling
   server.on("/status", HTTP_GET, []() {
-    String json = "{\"tally\":\"" + currentTallyState + "\",\"text\":\"" + currentTallyText + "\",\"ip\":\"" + getActiveIP() + "\",\"connection\":\"" + getConnectionStatus() + "\"}";
+    String json = "{\"tally\":\"" + currentTallyState + "\",\"text\":\"" + jsonEscape(currentTallyText) + "\",\"ip\":\"" + getActiveIP() + "\",\"connection\":\"" + getConnectionStatus() + "\"}";
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
   });
@@ -1121,14 +1207,15 @@ void setupWebServer() {
   server.on("/info", HTTP_GET, []() {
     String mac = eth_connected ? ETH.macAddress() : WiFi.macAddress();
     String json = "{";
-    json += "\"hostname\":\"" + deviceHostname + "\",";
+    json += "\"hostname\":\"" + jsonEscape(deviceHostname) + "\",";
     json += "\"ip\":\"" + getActiveIP() + "\",";
     json += "\"mac\":\"" + mac + "\",";
     json += "\"tslAddress\":" + String(tslAddress) + ",";
     json += "\"tallyState\":\"" + currentTallyState + "\",";
-    json += "\"tallyText\":\"" + currentTallyText + "\",";
+    json += "\"tallyText\":\"" + jsonEscape(currentTallyText) + "\",";
     json += "\"connection\":\"" + getConnectionStatus() + "\",";
-    json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\"";
+    json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
+    json += "\"build\":\"" __DATE__ " " __TIME__ "\"";
     json += "}";
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
@@ -1146,8 +1233,8 @@ void setupWebServer() {
     for (int i = 0; i < numDiscoveredDevices; i++) {
       if (i > 0) json += ",";
       json += "{";
-      json += "\"hostname\":\"" + discoveredDevices[i].hostname + "\",";
-      json += "\"ip\":\"" + discoveredDevices[i].ip + "\",";
+      json += "\"hostname\":\"" + jsonEscape(discoveredDevices[i].hostname) + "\",";
+      json += "\"ip\":\"" + jsonEscape(discoveredDevices[i].ip) + "\",";
       json += "\"tslAddress\":" + String(discoveredDevices[i].tslAddress);
       json += "}";
     }
@@ -1178,9 +1265,9 @@ void setupWebServer() {
   server.on("/api/check-update", HTTP_GET, []() {
     checkForUpdates();
     String json = "{\"current\":\"" + String(FIRMWARE_VERSION) + "\",";
-    json += "\"latest\":\"" + latestVersion + "\",";
+    json += "\"latest\":\"" + jsonEscape(latestVersion) + "\",";
     json += "\"updateAvailable\":" + String(updateAvailable ? "true" : "false") + ",";
-    json += "\"firmwareURL\":\"" + firmwareURL + "\"}";
+    json += "\"firmwareURL\":\"" + jsonEscape(firmwareURL) + "\"}";
     server.send(200, "application/json", json);
   });
 
@@ -1276,9 +1363,9 @@ void setupWebServer() {
     response += "<style>body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.message{text-align:center}h1{color:#00d4ff}a{color:#00d4ff}</style>";
     response += "</head><body><div class=\"message\"><h1>Settings Saved!</h1>";
     response += "<p>Device is rebooting...</p>";
-    response += "<p>Reconnect at: <a href=\"" + newAddress + "\">" + newAddress + "</a></p>";
+    response += "<p>Reconnect at: <a href=\"" + htmlEscape(newAddress) + "\">" + htmlEscape(newAddress) + "</a></p>";
     if (!useDHCP) {
-      response += "<p>Or: <a href=\"http://" + staticIP + "/\">http://" + staticIP + "/</a></p>";
+      response += "<p>Or: <a href=\"http://" + htmlEscape(staticIP) + "/\">http://" + htmlEscape(staticIP) + "/</a></p>";
     }
     response += "</div></body></html>";
 
