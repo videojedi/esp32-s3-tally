@@ -15,10 +15,10 @@ Connect USB-C power to the ESP32-S3. The LED will show startup indicators:
 
 | LED Pattern | Meaning |
 |-------------|---------|
-| Green blink | Looking for Ethernet |
+| Pulsing orange | Looking for Ethernet |
 | Purple blink | Connecting to WiFi |
-| Cyan pulse | AP mode (no network found) |
-| R-G-B cycle | Connected and ready |
+| Cyan blink, then dim cyan | AP mode (no network found) |
+| Red, green, blue cycle | Connected and ready |
 
 ## Step 2: Connect to the Device
 
@@ -76,9 +76,11 @@ Use a TSL tally plugin to send multicast tally data.
 ## Step 5: Test It
 
 On the web interface, use the test buttons:
-- Hold **GREEN** - Should show green (preview)
-- Hold **RED** - Should show red (program/live)
-- Hold **YELLOW** - Should show yellow (both)
+- Hold **GREEN** - Preview/safe
+- Hold **RED** - Program/on-air
+- Hold **YELLOW** - Both preview and program
+
+Releasing a button returns the light to whatever the switcher last sent.
 
 Then test with your actual switcher by selecting the camera.
 
