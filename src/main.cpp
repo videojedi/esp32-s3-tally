@@ -51,7 +51,7 @@ void onEvent(arduino_event_id_t event);
 void setupWebServer();
 String getConfigPage();
 void udpTSL(char *data);
-void setTallyState(int state);
+void setTallyState(int state, int brightness = -1);  // brightness < 0 = maxBrightness
 bool setupWiFi();
 void startAP();
 String getActiveIP();
@@ -116,6 +116,9 @@ static bool discoMode = false;
 static unsigned long discoEndTime = 0;
 String currentTallyState = "Off";
 String currentTallyText = "";
+// Last state/brightness received over TSL; restored when a test button is released
+volatile int tslState = 0;
+volatile int tslBrightness = -1;
 
 // Structure for discovered tally devices
 struct TallyDevice {
@@ -445,9 +448,10 @@ void startAP() {
   }
 }
 
-// Set tally state directly (used by both TSL and test buttons)
-void setTallyState(int state) {
-  FastLED.setBrightness(maxBrightness);
+// Set tally state directly (used by both TSL and test buttons).
+// brightness: 0-255 to apply a TSL-derived level, or -1 for maxBrightness.
+void setTallyState(int state, int brightness) {
+  FastLED.setBrightness(brightness < 0 ? maxBrightness : brightness);
   switch (state) {
     case 0:
       fill_solid(leds, NUM_LEDS, CRGB::Black);
@@ -506,9 +510,10 @@ void udpTSL(char *data) {
     Bright = Bright >> 4;
     Bright = map(Bright, 0, 3, 0, maxBrightness);
     Serial.printf("Brightness: %d\n", Bright);
-    FastLED.setBrightness(Bright);
 
-    setTallyState(T);
+    tslState = T;
+    tslBrightness = Bright;
+    setTallyState(T, Bright);  // setTallyState applies brightness before show()
   }
 }
 
@@ -1099,7 +1104,7 @@ String getConfigPage() {
   html += "function toggleIPFields(){var d=document.getElementById('dhcp').value;var f=document.getElementById('ipFields');if(d==='0'){f.classList.add('show')}else{f.classList.remove('show')}}";
   html += "function toggleWifiFields(){var w=document.getElementById('wifiEn').value;var f=document.getElementById('wifiFields');if(w==='1'){f.classList.add('show')}else{f.classList.remove('show')}}";
   html += "function testOn(s){fetch('/test?state='+s).then(r=>r.json()).then(applyTally).catch(e=>{})}";
-  html += "function testOff(){fetch('/test?state=0').then(r=>r.json()).then(applyTally).catch(e=>{})}";
+  html += "function testOff(){fetch('/test?restore=1').then(r=>r.json()).then(applyTally).catch(e=>{})}";
   html += "var devices=[];";
   html += "function discoverDevices(){";
   html += "document.getElementById('deviceList').innerHTML='<p class=\"no-devices\">Scanning...</p>';";
@@ -1194,7 +1199,9 @@ void setupWebServer() {
 
   // Test tally endpoint - with CORS for cross-device control
   server.on("/test", HTTP_GET, []() {
-    if (server.hasArg("state")) {
+    if (server.hasArg("restore")) {
+      setTallyState(tslState, tslBrightness);  // back to what the switcher last sent
+    } else if (server.hasArg("state")) {
       int state = server.arg("state").toInt();
       setTallyState(state);
     }
