@@ -52,7 +52,7 @@ Open the web interface and set:
 
 ### Network Settings
 - **Hostname:** Give it a memorable name like `CAM1` or `Guest`
-- **WiFi:** Enable and enter credentials if you want WiFi fallback
+- **WiFi:** Enable, then **Scan for Networks** and tap your network (or type the SSID) and enter the password if you want WiFi fallback
 
 Click **Save Settings**. The device will reboot.
 

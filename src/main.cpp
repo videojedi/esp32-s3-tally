@@ -897,6 +897,7 @@ String jsonEscape(const String& s) {
 // HTML page for configuration
 String getConfigPage() {
   String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset=\"utf-8\">";
   html += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
   html += "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23ff0000'/></svg>\">";
   html += "<title>TSL Tally Configuration</title>";
@@ -932,8 +933,13 @@ String getConfigPage() {
   html += ".device-details{font-size:12px;color:#888}";
   html += ".device-link{padding:8px 12px;background:#00d4ff;color:#1a1a2e;text-decoration:none;border-radius:4px;font-size:12px;white-space:nowrap}";
   html += ".device-link:hover{background:#00b4d8}";
-  html += ".refresh-btn{background:#0f3460;padding:8px 15px;margin-bottom:15px}";
+  html += ".refresh-btn{background:#0f3460;color:#eee;padding:8px 15px;margin-bottom:15px}";
   html += ".refresh-btn:hover{background:#1a4a7a}";
+  html += ".scan-btn{background:#0f3460;color:#eee;padding:8px 15px;margin-top:8px;font-size:14px}.scan-btn:hover{background:#1a4a7a}.scan-btn:disabled{opacity:0.6;cursor:default}";
+  html += ".wifi-list{display:none;max-height:220px;overflow-y:auto;margin-top:8px}.wifi-list.show{display:block}";
+  html += ".wifi-item{display:flex;align-items:center;padding:10px;background:#0f3460;border-radius:5px;margin-bottom:6px;cursor:pointer}.wifi-item:hover{background:#1a4a7a}";
+  html += ".wifi-name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
+  html += ".wifi-meta{font-size:12px;color:#888;margin-left:10px;white-space:nowrap;letter-spacing:1px}";
   html += ".bulk-btns{display:flex;gap:8px;margin-top:15px}";
   html += ".bulk-btn{flex:1;padding:10px;font-size:12px;margin-top:0}";
   html += ".no-devices{text-align:center;color:#666;padding:20px}";
@@ -970,7 +976,7 @@ String getConfigPage() {
 
   // Test Tally buttons (momentary - on while pressed)
   html += "<div class=\"card\"><h2>Test Tally</h2>";
-  html += "<p class=\"note\">Hold button to test - releases to off</p>";
+  html += "<p class=\"note\">Hold button to test</p>";
   html += "<div class=\"test-btns\">";
   html += "<button type=\"button\" class=\"test-btn btn-green\" onmousedown=\"testOn(1)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(1)\" ontouchend=\"event.preventDefault();testOff()\">GREEN</button>";
   html += "<button type=\"button\" class=\"test-btn btn-red\" onmousedown=\"testOn(2)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(2)\" ontouchend=\"event.preventDefault();testOff()\">RED</button>";
@@ -979,6 +985,7 @@ String getConfigPage() {
 
   // Network Devices section
   html += "<div class=\"card\"><h2>Network Devices</h2>";
+  html += "<p class=\"note\">Discovers other TSL tally lights on the network via mDNS</p>";
   html += "<button type=\"button\" class=\"refresh-btn\" onclick=\"discoverDevices()\">Scan Network</button>";
   html += "<div id=\"deviceList\" class=\"device-list\"><p class=\"no-devices\">Click Scan to find devices</p></div>";
   html += "<div class=\"bulk-btns\">";
@@ -986,7 +993,6 @@ String getConfigPage() {
   html += "<button type=\"button\" class=\"bulk-btn btn-red\" onclick=\"bulkTest(2)\">All RED</button>";
   html += "<button type=\"button\" class=\"bulk-btn\" onclick=\"bulkTest(0)\" style=\"background:#333;color:#fff\">All OFF</button>";
   html += "</div>";
-  html += "<p class=\"note\">Discovers other TSL tally lights on the network via mDNS</p>";
   html += "</div>";
 
   // Form
@@ -1007,30 +1013,6 @@ String getConfigPage() {
   html += "<label for=\"maxBright\">Max Brightness (1-255)</label>";
   html += "<input type=\"number\" id=\"maxBright\" name=\"maxBright\" min=\"1\" max=\"255\" value=\"" + String(maxBrightness) + "\" required" + ro + ">";
   html += "<p class=\"note\">TSL brightness (0-3) maps to 0 - max brightness</p>";
-  html += "</div>";
-
-  // WiFi Settings
-  html += "<div class=\"card\"><h2>WiFi Settings</h2>";
-  html += "<label for=\"wifiEn\">WiFi</label>";
-  html += "<select id=\"wifiEn\" name=\"wifiEn\" onchange=\"toggleWifiFields()\">";
-  html += "<option value=\"0\"" + String(!wifiEnabled ? " selected" : "") + ">Disabled</option>";
-  html += "<option value=\"1\"" + String(wifiEnabled ? " selected" : "") + ">Enabled</option>";
-  html += "</select>";
-
-  html += "<div id=\"wifiFields\" class=\"wifi-fields\">";
-  html += "<label for=\"wifiSSID\">WiFi SSID</label>";
-  html += "<input type=\"text\" id=\"wifiSSID\" name=\"wifiSSID\" value=\"" + htmlEscape(wifiSSID) + "\" maxlength=\"32\"" + ro + ">";
-  html += "<label for=\"wifiPass\">WiFi Password</label>";
-  // iOS Captive Network Assistant treats any form with a type=password input as a
-  // captive-portal login and auto-focuses the first text field (with keyboard).
-  // In AP mode serve a CSS-masked text input instead so the form is not a "login".
-  if (ap_mode) {
-    html += "<input type=\"text\" class=\"masked\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\" readonly>";
-  } else {
-    html += "<input type=\"password\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\">";
-  }
-  html += "</div>";
-  html += "<p class=\"note\">If WiFi fails, device will start an AP: " + apSSID + " (password: " + apPassword + ")</p>";
   html += "</div>";
 
   // Ethernet/Network Settings
@@ -1055,6 +1037,32 @@ String getConfigPage() {
   html += "<input type=\"text\" id=\"dns\" name=\"dns\" value=\"" + htmlEscape(dns) + "\"" + ro + ">";
   html += "</div>";
   html += "<p class=\"note\">Device will reboot after saving settings.</p>";
+  html += "</div>";
+
+  // WiFi Settings
+  html += "<div class=\"card\"><h2>WiFi Settings</h2>";
+  html += "<label for=\"wifiEn\">WiFi</label>";
+  html += "<select id=\"wifiEn\" name=\"wifiEn\" onchange=\"toggleWifiFields()\">";
+  html += "<option value=\"0\"" + String(!wifiEnabled ? " selected" : "") + ">Disabled</option>";
+  html += "<option value=\"1\"" + String(wifiEnabled ? " selected" : "") + ">Enabled</option>";
+  html += "</select>";
+
+  html += "<div id=\"wifiFields\" class=\"wifi-fields\">";
+  html += "<label for=\"wifiSSID\">WiFi SSID</label>";
+  html += "<input type=\"text\" id=\"wifiSSID\" name=\"wifiSSID\" value=\"" + htmlEscape(wifiSSID) + "\" maxlength=\"32\"" + ro + ">";
+  html += "<button type=\"button\" class=\"scan-btn\" id=\"wifiScanBtn\" onclick=\"wifiScan()\">Scan for Networks</button>";
+  html += "<div id=\"wifiList\" class=\"wifi-list\"></div>";
+  html += "<label for=\"wifiPass\">WiFi Password</label>";
+  // iOS Captive Network Assistant treats any form with a type=password input as a
+  // captive-portal login and auto-focuses the first text field (with keyboard).
+  // In AP mode serve a CSS-masked text input instead so the form is not a "login".
+  if (ap_mode) {
+    html += "<input type=\"text\" class=\"masked\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\" readonly>";
+  } else {
+    html += "<input type=\"password\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\">";
+  }
+  html += "</div>";
+  html += "<p class=\"note\">If WiFi fails, device will start an AP: " + apSSID + " (password: " + apPassword + ")</p>";
   html += "</div>";
 
   html += "<div style=\"display:flex;gap:10px;margin-top:20px\">";
@@ -1133,6 +1141,23 @@ String getConfigPage() {
   html += "function bulkTest(state){";
   html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/test?state='+state).catch(function(){});});";
   html += "fetch('/test?state='+state);}";
+  // WiFi scan: /api/wifi-scan?start=1 kicks off an async scan; poll without the
+  // param until scanning is false. Results sorted strongest first, one row per SSID.
+  html += "var wifiTimer=null;";
+  html += "function escHtml(s){return String(s).replace(/[&<>\"']/g,function(c){return '&#'+c.charCodeAt(0)+';'});}";
+  html += "function wifiScan(start){var l=document.getElementById('wifiList'),b=document.getElementById('wifiScanBtn');";
+  html += "if(start!==false){start=true;clearTimeout(wifiTimer);l.classList.add('show');l.innerHTML='<p class=\"no-devices\">Scanning...</p>';b.disabled=true;b.textContent='Scanning...';}";
+  html += "fetch('/api/wifi-scan'+(start?'?start=1':'')).then(r=>r.json()).then(d=>{";
+  html += "if(d.scanning){wifiTimer=setTimeout(function(){wifiScan(false)},750);return;}";
+  html += "b.disabled=false;b.textContent='Scan for Networks';";
+  html += "if(!d.networks){l.innerHTML='<p class=\"no-devices\">Scan failed</p>';return;}";
+  html += "var seen={},h='';d.networks.sort(function(a,c){return c.rssi-a.rssi}).forEach(function(w){";
+  html += "if(!w.ssid||seen[w.ssid])return;seen[w.ssid]=1;var q=w.rssi>=-55?4:w.rssi>=-65?3:w.rssi>=-75?2:1;";
+  html += "h+='<div class=\"wifi-item\" onclick=\"pickWifi(this)\" data-ssid=\"'+escHtml(w.ssid)+'\"><span class=\"wifi-name\">'+escHtml(w.ssid)+'</span>'";
+  html += "+'<span class=\"wifi-meta\">'+(w.enc?'&#128274; ':'')+'&#9679;'.repeat(q)+'&#9675;'.repeat(4-q)+'</span></div>';});";
+  html += "l.innerHTML=h||'<p class=\"no-devices\">No networks found</p>';";
+  html += "}).catch(function(){b.disabled=false;b.textContent='Scan for Networks';l.innerHTML='<p class=\"no-devices\">Scan failed</p>';});}";
+  html += "function pickWifi(el){document.getElementById('wifiSSID').value=el.getAttribute('data-ssid');document.getElementById('wifiList').classList.remove('show');}";
   html += "function resetDefaults(){if(confirm('Reset all settings to factory defaults?\\n\\nThis will erase all configuration and reboot the device.')){window.location.href='/reset';}}";
   // Firmware update functions
   html += "function checkUpdate(){";
@@ -1246,6 +1271,37 @@ void setupWebServer() {
       json += "}";
     }
     json += "],\"count\":" + String(numDiscoveredDevices) + "}";
+    server.send(200, "application/json", json);
+  });
+
+  // Scan for WiFi networks. ?start=1 begins a new async scan (unless one is already
+  // running); a call without it returns the last result. Enables the STA interface as
+  // a side effect (AP mode becomes AP+STA, Ethernet-only gains an idle STA); the AP
+  // stays up, but beacons pause briefly while the radio hops channels.
+  server.on("/api/wifi-scan", HTTP_GET, []() {
+    int16_t n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_FAILED || (server.hasArg("start") && n != WIFI_SCAN_RUNNING)) {
+      WiFi.scanDelete();
+      n = WiFi.scanNetworks(true);  // async
+    }
+    if (n == WIFI_SCAN_RUNNING) {
+      server.send(200, "application/json", "{\"scanning\":true}");
+      return;
+    }
+    if (n < 0) {
+      server.send(200, "application/json", "{\"scanning\":false,\"error\":\"scan failed\"}");
+      return;
+    }
+    String json = "{\"scanning\":false,\"networks\":[";
+    for (int i = 0; i < n; i++) {
+      if (i > 0) json += ",";
+      json += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\",";
+      json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+      json += "\"ch\":" + String(WiFi.channel(i)) + ",";
+      json += "\"enc\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true");
+      json += "}";
+    }
+    json += "]}";
     server.send(200, "application/json", json);
   });
 

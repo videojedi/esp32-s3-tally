@@ -113,6 +113,7 @@ TSL brightness levels map to the LEDs as a fraction of Max Brightness:
 |---------|-------------|
 | WiFi Enable | Enable/disable WiFi client |
 | SSID | WiFi network name |
+| Scan for Networks | Lists nearby networks, strongest first, one row per SSID with a lock for secured networks. Tap a row to fill in the SSID. Works in Ethernet, WiFi and AP mode |
 | Password | WiFi password |
 
 ### Ethernet Settings
@@ -205,6 +206,7 @@ The text label is filtered to printable ASCII and trimmed.
 | `/test?state=N` | GET | Set tally state (0-3) at max brightness |
 | `/test?restore=1` | GET | Return to the last state received over TSL |
 | `/discover` | GET | Scan network (cached 10 s) and return found tally devices |
+| `/api/wifi-scan` | GET | Start an async WiFi scan (`?start=1`) or return its result; `{"scanning":true}` while running |
 | `/disco?duration=N` | GET | Start disco mode for N seconds (1-120, default 30) |
 | `/disco-stop` | GET | Stop disco mode and restore the tally state |
 | `/api/check-update` | GET | Check GitHub for firmware updates |
