@@ -27,7 +27,7 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 |-----------|-------------|
 | ESP32-S3 DevKitC-1 | Main microcontroller |
 | W5500 Ethernet Module | SPI Ethernet PHY |
-| WS2812B LED Ring | 7 addressable RGB LEDs |
+| WS2812B LED Ring | 7 addressable RGB LEDs (1 middle + 6 ring, e.g. NeoPixel Jewel) |
 
 ### Pin Configuration
 
@@ -97,6 +97,7 @@ Type `disco` anywhere on the configuration page to run a 30-second rainbow party
 | Multicast Address | TSL multicast group | 239.1.2.3 |
 | TSL Port | UDP port | 8901 |
 | Max Brightness | LED brightness limit (1-255) | 50 |
+| LED Animation | How an active tally is drawn: Solid or Spin | Solid |
 
 TSL brightness levels map to the LEDs as a fraction of Max Brightness:
 
@@ -106,6 +107,8 @@ TSL brightness levels map to the LEDs as a fraction of Max Brightness:
 | 1 | ⅓ of max |
 | 2 | ⅔ of max |
 | 3 | Max brightness |
+
+**LED Animation** controls how Green, Red and Yellow are shown on the ring. **Solid** lights all seven LEDs. **Spin** keeps the middle LED on at the tally colour, holds the outer six at a dim level and sweeps a bright point with a fading tail round them (one revolution every 0.8 s). Off is always dark. The firmware assumes the middle LED is first in the data chain (`CENTER_LED 0` in main.cpp); set it to 6 if the ring is wired before the middle.
 
 ### WiFi Settings
 
@@ -145,7 +148,7 @@ When no network is available, the device creates its own access point:
 - SSID: `Tally-XXYYZZ-Setup` (unique per device)
 - Password: `tallytally`
 - IP: `192.168.4.1`
-- LED indicator: three cyan blinks, then dim cyan
+- LED indicator: cyan spin, then dim cyan
 - **Captive Portal** - Configuration page opens automatically when you connect
 - TSL reception, mDNS and PlatformIO OTA are disabled in AP mode
 
@@ -153,9 +156,9 @@ When no network is available, the device creates its own access point:
 
 | Pattern | Meaning |
 |---------|---------|
-| Pulsing orange | Waiting for Ethernet link |
-| Purple blink | Connecting to WiFi |
-| White flash, then cyan blink (3x) | AP mode starting |
+| Orange spin | Waiting for Ethernet link |
+| Purple spin | Connecting to WiFi |
+| Cyan spin | AP mode starting |
 | Dim cyan | AP mode active |
 | Red blink | Factory reset in progress |
 | Blue flash | Factory reset complete |
@@ -163,6 +166,8 @@ When no network is available, the device creates its own access point:
 | Purple (solid) | GitHub firmware update in progress |
 | Green (solid) then reboot | GitHub firmware update succeeded |
 | Red (2 s) | GitHub firmware update failed |
+
+The boot stages use the same spin animation as the **LED Animation** setting: the middle LED stays on in the stage colour, the outer six glow dimly and a bright point with a fading tail sweeps round them.
 
 ### Tally Colors
 

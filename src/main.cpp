@@ -52,6 +52,10 @@ void setupWebServer();
 String getConfigPage();
 void udpTSL(char *data);
 void setTallyState(int state, int brightness = -1);  // brightness < 0 = maxBrightness
+void renderSpinFrame(CRGB colour, uint8_t brightness);
+void spinDelay(CRGB colour, unsigned long ms);
+void ledLock();
+void ledUnlock();
 bool setupWiFi();
 void startAP();
 String getActiveIP();
@@ -75,6 +79,8 @@ Preferences preferences;
 // Configurable settings (loaded from NVS)
 int tslAddress = 0;
 int maxBrightness = 50;  // Max brightness (0-255), TSL brightness maps to this
+enum LedAnimation { LED_ANIM_SOLID = 0, LED_ANIM_SPIN = 1 };
+int ledAnimation = LED_ANIM_SOLID;  // How an active tally is drawn on the ring
 int tslPort = 8901;      // TSL multicast port
 String tslMulticast = "239.1.2.3";  // TSL multicast address
 bool useDHCP = true;
@@ -108,6 +114,14 @@ TaskHandle_t udpTaskHandle = NULL;
 volatile bool udpRunning = false;
 
 CRGB leds[NUM_LEDS];
+
+// The LEDs are written from two cores: the UDP task (core 0) on every TSL packet and
+// loop() (core 1) for animation frames. ledMutex serialises brightness + fill + show.
+SemaphoreHandle_t ledMutex = NULL;
+// Active tally as last set by setTallyState(); loop() keeps the spin animation turning
+static CRGB tallyColour = CRGB::Black;
+static uint8_t tallyLevel = 0;
+static volatile bool spinActive = false;
 
 static bool eth_connected = false;
 static bool wifi_connected = false;
@@ -155,6 +169,7 @@ void loadSettings() {
   preferences.begin("tally", true);  // read-only
   tslAddress = preferences.getInt("tslAddress", 0);
   maxBrightness = preferences.getInt("maxBright", 50);
+  ledAnimation = preferences.getInt("ledAnim", LED_ANIM_SOLID);
   tslPort = preferences.getInt("tslPort", 8901);
   tslMulticast = preferences.getString("tslMcast", "239.1.2.3");
   useDHCP = preferences.getBool("useDHCP", true);
@@ -173,6 +188,7 @@ void loadSettings() {
   Serial.printf("  TSL Multicast: %s\n", tslMulticast.c_str());
   Serial.printf("  TSL Port: %d\n", tslPort);
   Serial.printf("  Max Brightness: %d\n", maxBrightness);
+  Serial.printf("  LED Animation: %s\n", ledAnimation == LED_ANIM_SPIN ? "Spin" : "Solid");
   Serial.printf("  DHCP: %s\n", useDHCP ? "Yes" : "No");
   if (!useDHCP) {
     Serial.printf("  Static IP: %s\n", staticIP.c_str());
@@ -192,6 +208,7 @@ void saveSettings() {
   preferences.begin("tally", false);  // read-write
   preferences.putInt("tslAddress", tslAddress);
   preferences.putInt("maxBright", maxBrightness);
+  preferences.putInt("ledAnim", ledAnimation);
   preferences.putInt("tslPort", tslPort);
   preferences.putString("tslMcast", tslMulticast);
   preferences.putBool("useDHCP", useDHCP);
@@ -217,6 +234,7 @@ void resetSettings() {
   // Reset to defaults in memory
   tslAddress = 0;
   maxBrightness = 50;
+  ledAnimation = LED_ANIM_SOLID;
   tslPort = 8901;
   tslMulticast = "239.1.2.3";
   useDHCP = true;
@@ -228,6 +246,61 @@ void resetSettings() {
   wifiSSID = "";
   wifiPassword = "";
   wifiEnabled = false;
+}
+
+// ---- LED ring animation ----
+// The seven LEDs are one in the middle and six in a ring around it. The spin animation
+// keeps the middle LED on at full colour, holds the ring at a dim base level and sweeps
+// a bright head with a fading tail round the six once per SPIN_PERIOD_MS. It draws an
+// active tally when LED Animation is set to Spin, and the Ethernet / WiFi / AP stages
+// of boot.
+#define CENTER_LED 0        // data-order index of the middle LED: 0 (NeoPixel Jewel) or 6
+#define RING_LEDS (NUM_LEDS - 1)
+#define SPIN_PERIOD_MS 800  // one revolution
+#define SPIN_BASE 40        // level (0-255) of LEDs away from the head
+#define SPIN_LEAD 128       // ramp-up ahead of the head, in 1/256 LED
+#define SPIN_TAIL 512       // fade-out behind the head, in 1/256 LED
+
+void ledLock() {
+  if (ledMutex) xSemaphoreTake(ledMutex, portMAX_DELAY);
+}
+
+void ledUnlock() {
+  if (ledMutex) xSemaphoreGive(ledMutex);
+}
+
+// Draw one frame of the spin animation for the current millis(). Callers that can run
+// concurrently with the UDP task must hold ledMutex.
+void renderSpinFrame(CRGB colour, uint8_t brightness) {
+  const int32_t ring = RING_LEDS * 256;  // circumference in 1/256 LED
+  int32_t head = ((millis() % SPIN_PERIOD_MS) * ring) / SPIN_PERIOD_MS;
+  leds[CENTER_LED] = colour;  // middle LED stays on
+  for (int k = 0; k < RING_LEDS; k++) {
+    int32_t d = head - k * 256;  // how far the head is past this ring position
+    if (d < -ring / 2) d += ring;  // wrap to (-ring/2, ring/2]
+    if (d > ring / 2) d -= ring;
+    uint8_t level = SPIN_BASE;
+    if (d >= 0 && d < SPIN_TAIL) {
+      level = 255 - ((255 - SPIN_BASE) * d) / SPIN_TAIL;  // tail behind the head
+    } else if (d < 0 && d > -SPIN_LEAD) {
+      level = 255 - ((255 - SPIN_BASE) * -d) / SPIN_LEAD;  // ramp in ahead of it
+    }
+    int i = k < CENTER_LED ? k : k + 1;  // ring position -> data index, skipping the middle
+    leds[i] = colour;
+    leds[i].nscale8(level);
+  }
+  FastLED.setBrightness(brightness);
+  FastLED.show();
+}
+
+// Block for at least ms while spinning the ring in colour. Replaces delay() during the
+// boot network stages, which run before the UDP task exists so no lock is needed.
+void spinDelay(CRGB colour, unsigned long ms) {
+  unsigned long start = millis();
+  do {
+    renderSpinFrame(colour, maxBrightness);
+    delay(20);
+  } while (millis() - start < ms);
 }
 
 // Check if reset button is held during boot
@@ -358,13 +431,16 @@ bool setupWiFi() {
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
 
   unsigned long startTime = millis();
+  unsigned long lastDot = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT) {
     yield();  // Feed the watchdog
-    delay(100);
-    Serial.print(".");
-    // Blink purple while connecting
-    fill_solid(leds, NUM_LEDS, ((millis() / 300) % 2) ? CRGB::Purple : CRGB::Black);
-    FastLED.show();
+    // Spin purple while connecting
+    renderSpinFrame(CRGB::Purple, maxBrightness);
+    delay(20);
+    if (millis() - lastDot >= 500) {
+      lastDot = millis();
+      Serial.print(".");
+    }
   }
   Serial.println();
 
@@ -384,20 +460,16 @@ bool setupWiFi() {
 
 // Start Access Point for configuration
 void startAP() {
-  // Flash white briefly to show we're about to start AP
-  fill_solid(leds, NUM_LEDS, CRGB::White);
-  FastLED.show();
-  delay(100);
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
+  // Spin cyan while the AP comes up
+  spinDelay(CRGB::Cyan, 100);
 
   // Disconnect any existing WiFi first
   WiFi.disconnect(true);
-  delay(100);
+  spinDelay(CRGB::Cyan, 100);
 
   // Set AP mode first so MAC address is available
   WiFi.mode(WIFI_AP);
-  delay(100);  // Let mode change settle
+  spinDelay(CRGB::Cyan, 100);  // Let mode change settle
 
   // Generate unique AP SSID using MAC address (must be after WiFi.mode)
   uint8_t mac[6];
@@ -409,7 +481,7 @@ void startAP() {
   Serial.printf("Starting AP: %s\n", apSSID.c_str());
 
   bool apStarted = WiFi.softAP(apSSID.c_str(), apPassword.c_str());
-  delay(500);  // Give AP time to fully initialize
+  spinDelay(CRGB::Cyan, 500);  // Give AP time to fully initialize
 
   if (apStarted) {
     ap_mode = true;
@@ -420,16 +492,8 @@ void startAP() {
     dnsServer.start(53, "*", apIP);
     Serial.println("Captive portal DNS started");
 
-    // Blink cyan to indicate AP mode
-    for (int i = 0; i < 3; i++) {
-      fill_solid(leds, NUM_LEDS, CRGB::Cyan);
-      FastLED.show();
-      delay(200);
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-      FastLED.show();
-      delay(200);
-      yield();  // Feed watchdog
-    }
+    // Keep spinning cyan long enough to read as "AP started"
+    spinDelay(CRGB::Cyan, 1500);
     // Leave LED dim cyan to show AP mode is active
     FastLED.setBrightness(10);
     fill_solid(leds, NUM_LEDS, CRGB::Cyan);
@@ -450,35 +514,31 @@ void startAP() {
 
 // Set tally state directly (used by both TSL and test buttons).
 // brightness: 0-255 to apply a TSL-derived level, or -1 for maxBrightness.
+// With LED Animation set to Spin, an active tally draws its first spin frame here and
+// loop() keeps it turning; Solid (and Off) fill the ring immediately.
 void setTallyState(int state, int brightness) {
-  FastLED.setBrightness(brightness < 0 ? maxBrightness : brightness);
+  CRGB colour;
   switch (state) {
-    case 0:
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-      currentTallyState = "Off";
-      Serial.println("Tally: Off");
-      break;
-    case 1:
-      fill_solid(leds, NUM_LEDS, CRGB::Green);
-      currentTallyState = "Green";
-      Serial.println("Tally: Green");
-      break;
-    case 2:
-      fill_solid(leds, NUM_LEDS, CRGB::Red);
-      currentTallyState = "Red";
-      Serial.println("Tally: Red");
-      break;
-    case 3:
-      fill_solid(leds, NUM_LEDS, CRGB::Yellow);
-      currentTallyState = "Yellow";
-      Serial.println("Tally: Yellow");
-      break;
-    default:
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-      currentTallyState = "Off";
-      Serial.println("Tally: Off*");
+    case 1:  colour = CRGB::Green;  currentTallyState = "Green";  break;
+    case 2:  colour = CRGB::Red;    currentTallyState = "Red";    break;
+    case 3:  colour = CRGB::Yellow; currentTallyState = "Yellow"; break;
+    case 0:  colour = CRGB::Black;  currentTallyState = "Off";    break;
+    default: colour = CRGB::Black;  currentTallyState = "Off";    state = 0;
   }
-  FastLED.show();
+  Serial.printf("Tally: %s\n", currentTallyState.c_str());
+
+  ledLock();
+  tallyColour = colour;
+  tallyLevel = brightness < 0 ? maxBrightness : brightness;
+  spinActive = (ledAnimation == LED_ANIM_SPIN && state != 0);
+  if (spinActive) {
+    renderSpinFrame(tallyColour, tallyLevel);
+  } else {
+    FastLED.setBrightness(tallyLevel);
+    fill_solid(leds, NUM_LEDS, tallyColour);
+    FastLED.show();
+  }
+  ledUnlock();
 }
 
 void udpTSL(char *data) {
@@ -1013,6 +1073,12 @@ String getConfigPage() {
   html += "<label for=\"maxBright\">Max Brightness (1-255)</label>";
   html += "<input type=\"number\" id=\"maxBright\" name=\"maxBright\" min=\"1\" max=\"255\" value=\"" + String(maxBrightness) + "\" required" + ro + ">";
   html += "<p class=\"note\">TSL brightness (0-3) maps to 0 - max brightness</p>";
+  html += "<label for=\"ledAnim\">LED Animation</label>";
+  html += "<select id=\"ledAnim\" name=\"ledAnim\">";
+  html += "<option value=\"0\"" + String(ledAnimation != LED_ANIM_SPIN ? " selected" : "") + ">Solid</option>";
+  html += "<option value=\"1\"" + String(ledAnimation == LED_ANIM_SPIN ? " selected" : "") + ">Spin</option>";
+  html += "</select>";
+  html += "<p class=\"note\">Spin sweeps a bright point around the ring while a tally is active</p>";
   html += "</div>";
 
   // Ethernet/Network Settings
@@ -1384,6 +1450,9 @@ void setupWebServer() {
     if (server.hasArg("maxBright")) {
       maxBrightness = constrain(server.arg("maxBright").toInt(), 1, 255);
     }
+    if (server.hasArg("ledAnim")) {
+      ledAnimation = server.arg("ledAnim") == "1" ? LED_ANIM_SPIN : LED_ANIM_SOLID;
+    }
     if (server.hasArg("hostname")) {
       deviceHostname = server.arg("hostname");
     }
@@ -1481,6 +1550,7 @@ void setup() {
   Serial.println("Video Walrus Single TSL tally interface 2025");
   Serial.println("");
 
+  ledMutex = xSemaphoreCreateMutex();
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);  // GRB ordering is typical
   FastLED.setBrightness(maxBrightness);
   FastLED.clear();  // clear all pixel data
@@ -1528,11 +1598,8 @@ void setup() {
     while (!eth_connected && millis() - ethStartTime < 10000) {  // 10 second timeout
       yield();  // Feed the watchdog
       delay(20);
-      // Pulse orange while waiting for Ethernet
-      uint8_t brightness = (sin8(millis() / 4) * maxBrightness) / 255;
-      fill_solid(leds, NUM_LEDS, CRGB::Orange);
-      FastLED.setBrightness(brightness);
-      FastLED.show();
+      // Spin orange while waiting for Ethernet
+      renderSpinFrame(CRGB::Orange, maxBrightness);
     }
     FastLED.setBrightness(maxBrightness);  // Restore brightness
     fill_solid(leds, NUM_LEDS, CRGB::Black);
@@ -1633,9 +1700,11 @@ void loop() {
         // Pick a random hue from 6 distinct rainbow colors (avoid in-between muddy colors)
         uint8_t hueOptions[] = {0, 32, 64, 96, 160, 192};  // Red, Orange, Yellow, Green, Blue, Purple
         uint8_t randomHue = hueOptions[random(6)];
+        ledLock();
         FastLED.setBrightness(255);  // Full brightness for disco
         fill_solid(leds, NUM_LEDS, CHSV(randomHue, 255, 255));
         FastLED.show();
+        ledUnlock();
       }
     } else {
       // Disco time is over
@@ -1646,6 +1715,16 @@ void loop() {
                     currentTallyState == "Red" ? 2 :
                     currentTallyState == "Yellow" ? 3 : 0);
     }
+  }
+
+  // Keep the spin animation turning while a tally is active. Disco owns the LEDs
+  // while it runs; setTallyState() restarts the spin when it ends.
+  static unsigned long lastSpinFrame = 0;
+  if (spinActive && !discoMode && millis() - lastSpinFrame >= 25) {
+    lastSpinFrame = millis();
+    ledLock();
+    if (spinActive) renderSpinFrame(tallyColour, tallyLevel);
+    ledUnlock();
   }
 
   // Handle web server requests

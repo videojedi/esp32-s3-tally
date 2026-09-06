@@ -15,9 +15,9 @@ Connect USB-C power to the ESP32-S3. The LED will show startup indicators:
 
 | LED Pattern | Meaning |
 |-------------|---------|
-| Pulsing orange | Looking for Ethernet |
-| Purple blink | Connecting to WiFi |
-| Cyan blink, then dim cyan | AP mode (no network found) |
+| Orange spin | Looking for Ethernet |
+| Purple spin | Connecting to WiFi |
+| Cyan spin, then dim cyan | AP mode (no network found) |
 | Red, green, blue cycle | Connected and ready |
 
 ## Step 2: Connect to the Device
