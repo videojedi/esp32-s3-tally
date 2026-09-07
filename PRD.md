@@ -77,6 +77,8 @@ The device shall receive and process TSL 3.1 and TSL 5.0 UMD protocol messages v
 - Bytes 8-9: CONTROL (little endian) - tally and brightness
 - Bytes 10+: Text (null terminated)
 
+**Alternative source: Tally Arbiter.** With Tally Source set to Tally Arbiter the device registers as a listener client with a Tally Arbiter server (socket.io, port 4455) and follows one of its devices: program → red, preview → green, both → yellow. Device assignment from the tally's page or from Tally Arbiter's producer page; flash supported.
+
 ### FR-2: Network Connectivity
 
 **Priority:** Critical
@@ -183,7 +185,7 @@ The device shall support over-the-air firmware updates via two methods.
 All configuration shall persist across power cycles using ESP32 NVS (Non-Volatile Storage).
 
 **Stored Settings:**
-- TSL address, multicast IP, port, max brightness, LED animation (Solid/Spin), settings PIN
+- Tally source (TSL / Tally Arbiter), TSL address, multicast IP, port, Tally Arbiter host, port and device, max brightness, LED animation (Solid/Spin), settings PIN
 - Settings apply live unless network, hostname or TSL socket settings changed (then reboot)
 - Network mode (DHCP/Static), static IP configuration
 - WiFi enabled flag, SSID, password

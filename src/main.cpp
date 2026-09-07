@@ -46,6 +46,7 @@
 #include <mbedtls/base64.h>
 #include "certs.h"
 #include "signing_key.h"
+#include "arbiter.h"
 
 // OTA update manifest published by release.sh (see otaCheck). A build flag can override
 // the URL so a test build points at a test manifest.
@@ -75,6 +76,7 @@ void renderSpinFrame(CRGB colour, uint8_t brightness);
 void spinDelay(CRGB colour, unsigned long ms);
 void ledLock();
 void ledUnlock();
+void ledShowSolid(CRGB colour);
 bool setupWiFi();
 void startAP();
 String getActiveIP();
@@ -101,6 +103,11 @@ int maxBrightness = 50;  // Max brightness (0-255), TSL brightness maps to this
 enum LedAnimation { LED_ANIM_SOLID = 0, LED_ANIM_SPIN = 1 };
 int ledAnimation = LED_ANIM_SOLID;  // How an active tally is drawn on the ring
 String settingsPin = "";  // Settings lock PIN, "" = no lock
+enum TallySource { SOURCE_TSL = 0, SOURCE_ARBITER = 1 };
+int tallySource = SOURCE_TSL;       // where the tally state comes from
+String taHost = "";                 // Tally Arbiter server host or IP
+int taPort = 4455;
+String taDeviceId = "unassigned";   // Tally Arbiter device we follow
 int tslPort = 8901;      // TSL multicast port
 String tslMulticast = "239.1.2.3";  // TSL multicast address
 bool useDHCP = true;
@@ -138,6 +145,7 @@ CRGB leds[NUM_LEDS];
 // The LEDs are written from two cores: the UDP task (core 0) on every TSL packet and
 // loop() (core 1) for animation frames. ledMutex serialises brightness + fill + show.
 SemaphoreHandle_t ledMutex = NULL;
+SemaphoreHandle_t nvsMutex = NULL;  // saveSettings() from the web server and the Tally Arbiter task
 // Active tally as last set by setTallyState(); loop() keeps the spin animation turning
 static CRGB tallyColour = CRGB::Black;
 static uint8_t tallyLevel = 0;
@@ -203,6 +211,10 @@ void loadSettings() {
   maxBrightness = preferences.getInt("maxBright", 50);
   ledAnimation = preferences.getInt("ledAnim", LED_ANIM_SOLID);
   settingsPin = preferences.getString("pin", "");
+  tallySource = preferences.getInt("src", SOURCE_TSL);
+  taHost = preferences.getString("taHost", "");
+  taPort = preferences.getInt("taPort", 4455);
+  taDeviceId = preferences.getString("taDevice", "unassigned");
   tslPort = preferences.getInt("tslPort", 8901);
   tslMulticast = preferences.getString("tslMcast", "239.1.2.3");
   useDHCP = preferences.getBool("useDHCP", true);
@@ -223,6 +235,8 @@ void loadSettings() {
   Serial.printf("  Max Brightness: %d\n", maxBrightness);
   Serial.printf("  LED Animation: %s\n", ledAnimation == LED_ANIM_SPIN ? "Spin" : "Solid");
   Serial.printf("  Settings lock: %s\n", settingsPin.length() ? "PIN set" : "off");
+  Serial.printf("  Tally source: %s\n", tallySource == SOURCE_ARBITER ? "Tally Arbiter" : "TSL 3.1");
+  if (tallySource == SOURCE_ARBITER) Serial.printf("  Tally Arbiter: %s:%d device %s\n", taHost.c_str(), taPort, taDeviceId.c_str());
   Serial.printf("  DHCP: %s\n", useDHCP ? "Yes" : "No");
   if (!useDHCP) {
     Serial.printf("  Static IP: %s\n", staticIP.c_str());
@@ -239,11 +253,16 @@ void loadSettings() {
 
 // Save settings to NVS
 void saveSettings() {
+  if (nvsMutex) xSemaphoreTake(nvsMutex, portMAX_DELAY);
   preferences.begin("tally", false);  // read-write
   preferences.putInt("tslAddress", tslAddress);
   preferences.putInt("maxBright", maxBrightness);
   preferences.putInt("ledAnim", ledAnimation);
   preferences.putString("pin", settingsPin);
+  preferences.putInt("src", tallySource);
+  preferences.putString("taHost", taHost);
+  preferences.putInt("taPort", taPort);
+  preferences.putString("taDevice", taDeviceId);
   preferences.putInt("tslPort", tslPort);
   preferences.putString("tslMcast", tslMulticast);
   preferences.putBool("useDHCP", useDHCP);
@@ -256,6 +275,7 @@ void saveSettings() {
   preferences.putString("wifiPass", wifiPassword);
   preferences.putBool("wifiEnabled", wifiEnabled);
   preferences.end();
+  if (nvsMutex) xSemaphoreGive(nvsMutex);
   Serial.println("Settings saved to NVS");
 }
 
@@ -271,6 +291,10 @@ void resetSettings() {
   maxBrightness = 50;
   ledAnimation = LED_ANIM_SOLID;
   settingsPin = "";
+  tallySource = SOURCE_TSL;
+  taHost = "";
+  taPort = 4455;
+  taDeviceId = "unassigned";
   tslPort = 8901;
   tslMulticast = "239.1.2.3";
   useDHCP = true;
@@ -390,7 +414,7 @@ void spinDelay(CRGB colour, unsigned long ms) {
 // powering on or pressing RESET: GPIO 0 low at reset enters the USB bootloader instead.
 static uint32_t btnDownMs = 0;
 static bool btnArmed = false;
-static volatile bool btnOverride = false;  // ring shows the countdown; setTallyState() waits
+volatile bool ledOverride = false;  // countdown / flash owns the ring; setTallyState() and the spin wait
 
 void buttonTick() {
   uint32_t now = millis();
@@ -400,7 +424,7 @@ void buttonTick() {
     if (held < BTN_UNLOCK_MS) return;
     if (!btnArmed) {
       btnArmed = true;
-      btnOverride = true;
+      ledOverride = true;
       Serial.println("[Button] Held 3 s: release to unlock settings, keep holding for factory reset");
     }
     if (held >= BTN_RESET_MS) {
@@ -424,7 +448,7 @@ void buttonTick() {
     btnDownMs = 0;
     if (btnArmed) {
       btnArmed = false;
-      btnOverride = false;
+      ledOverride = false;
       lockPhysicalUnlock(UNLOCK_WINDOW_MS);
       Serial.printf("[Button] Settings unlocked for %lu minutes\n", UNLOCK_WINDOW_MS / 60000UL);
       setTallyState(tslState, tslBrightness);  // back to the tally
@@ -630,7 +654,7 @@ void setTallyState(int state, int brightness) {
   tallyColour = colour;
   tallyLevel = brightness < 0 ? maxBrightness : brightness;
   spinActive = (ledAnimation == LED_ANIM_SPIN && state != 0);
-  if (updateInProgress || btnOverride) {
+  if (updateInProgress || ledOverride) {
     // otaInstall() or the BOOT button owns the LEDs; the state is redrawn when they finish
   } else if (spinActive) {
     renderSpinFrame(tallyColour, tallyLevel);
@@ -775,6 +799,7 @@ void startMDNS() {
 
     // Add TXT records for device info (used by discovery)
     MDNS.addServiceTxt("tally", "tcp", "tsladdr", String(tslAddress));
+    MDNS.addServiceTxt("tally", "tcp", "src", tallySource == SOURCE_ARBITER ? "arbiter" : "tsl");
     MDNS.addServiceTxt("tally", "tcp", "version", FIRMWARE_VERSION);
     MDNS.addServiceTxt("tally", "tcp", "mac", eth_connected ? ETH.macAddress() : WiFi.macAddress());
   } else {
@@ -965,7 +990,7 @@ static void otaFail(const String& why) {
   Update.abort();
 }
 
-static void otaShow(CRGB colour) {
+void ledShowSolid(CRGB colour) {
   ledLock();
   FastLED.setBrightness(maxBrightness);
   fill_solid(leds, NUM_LEDS, colour);
@@ -989,7 +1014,7 @@ void otaInstall() {
   updateInProgress = true;  // setTallyState() leaves the LEDs alone until this clears
   otaLastError = "";
   Serial.printf("[Update] Downloading %s\n", firmwareURL.c_str());
-  otaShow(CRGB::Purple);
+  ledShowSolid(CRGB::Purple);
 
   WiFiClientSecure client;
   client.setCACert(AMAZON_ROOT_CAS);
@@ -1066,14 +1091,14 @@ void otaInstall() {
 
   if (ok) {
     Serial.println("[Update] Success, rebooting...");
-    otaShow(CRGB::Green);
+    ledShowSolid(CRGB::Green);
     delay(1000);
     ESP.restart();
   }
   updateInProgress = false;
 
   // Failed: red for two seconds, then back to the current tally
-  otaShow(CRGB::Red);
+  ledShowSolid(CRGB::Red);
   delay(2000);
   setTallyState(tslState, tslBrightness);
 }
@@ -1178,7 +1203,9 @@ static String statusJson() {
   j += ",\"from\":" + q(IPAddress((uint32_t)tslLastFrom).toString());
   j += ",\"time\":" + String((unsigned long)time(nullptr));
   j += ",\"pinSet\":" + b(lockPinSet()) + ",\"phys\":" + b(lockPhysicallyUnlocked());
-  j += ",\"physLeft\":" + String((unsigned long)(lockPhysicalRemainingMs() / 1000)) + "}";
+  j += ",\"physLeft\":" + String((unsigned long)(lockPhysicalRemainingMs() / 1000));
+  j += ",\"src\":" + String(tallySource) + ",\"taConn\":" + b(arbiterConnected());
+  j += ",\"taHost\":" + q(taHost) + ",\"taPort\":" + String(taPort) + ",\"taDevice\":" + q(arbiterDeviceName()) + "}";
   return j;
 }
 
@@ -1192,6 +1219,9 @@ static String configJson() {
   j += "\"pinSet\":" + b(lockPinSet()) + ",";
   j += "\"tslAddr\":" + String(tslAddress) + ",\"mcast\":" + q(tslMulticast) + ",\"port\":" + String(tslPort) + ",";
   j += "\"maxBright\":" + String(maxBrightness) + ",\"ledAnim\":" + String(ledAnimation) + ",";
+  j += "\"src\":" + String(tallySource) + ",\"taHost\":" + q(taHost) + ",\"taPort\":" + String(taPort) + ",";
+  j += "\"taDevice\":" + q(taDeviceId) + ",\"taDeviceName\":" + q(arbiterDeviceName()) + ",\"taDevices\":" + arbiterDevicesJson() + ",";
+  j += "\"taStats\":" + arbiterStatsJson() + ",";
   j += "\"apMode\":" + b(ap_mode) + ",\"apSsid\":" + q(ap_mode ? apSSID : String("Tally-XXXXXX-Setup")) + ",\"apPass\":" + q(apPassword) + ",";
   j += "\"mac\":" + q(activeMac()) + ",";
   j += "\"fw\":" + q(FIRMWARE_VERSION) + ",";
@@ -1241,9 +1271,9 @@ static bool requireAuthPage() {
 static void handleSave() {
   if (!requireAuthPage()) return;
   String bHost = deviceHostname, bIP = staticIP, bGW = gateway, bSN = subnet, bDNS = dns;
-  String bSSID = wifiSSID, bPass = wifiPassword, bMcast = tslMulticast;
+  String bSSID = wifiSSID, bPass = wifiPassword, bMcast = tslMulticast, bTaHost = taHost, bTaDevice = taDeviceId;
   bool bDHCP = useDHCP, bWifi = wifiEnabled;
-  int bPort = tslPort;
+  int bPort = tslPort, bSrc = tallySource, bTaPort = taPort;
 
   if (server.hasArg("tslAddr")) tslAddress = constrain(server.arg("tslAddr").toInt(), 0, 126);
   if (server.hasArg("tslMcast")) {
@@ -1256,6 +1286,13 @@ static void handleSave() {
     long p = server.arg("tslPort").toInt();
     if (p >= 1 && p <= 65535) tslPort = p;
   }
+  if (server.hasArg("src")) tallySource = server.arg("src") == "1" ? SOURCE_ARBITER : SOURCE_TSL;
+  if (server.hasArg("taHost")) { String h = server.arg("taHost"); h.trim(); taHost = h; }
+  if (server.hasArg("taPort")) {
+    long p = server.arg("taPort").toInt();
+    if (p >= 1 && p <= 65535) taPort = p;
+  }
+  if (server.hasArg("taDevice")) { String d = server.arg("taDevice"); d.trim(); if (d.length()) taDeviceId = d; }
   if (server.hasArg("maxBright")) maxBrightness = constrain(server.arg("maxBright").toInt(), 1, 255);
   if (server.hasArg("ledAnim")) ledAnimation = server.arg("ledAnim") == "1" ? LED_ANIM_SPIN : LED_ANIM_SOLID;
 
@@ -1282,7 +1319,8 @@ static void handleSave() {
 
   bool reboot = bHost != deviceHostname || bIP != staticIP || bGW != gateway || bSN != subnet ||
                 bDNS != dns || bSSID != wifiSSID || bPass != wifiPassword || bMcast != tslMulticast ||
-                bDHCP != useDHCP || bWifi != wifiEnabled || bPort != tslPort;
+                bDHCP != useDHCP || bWifi != wifiEnabled || bPort != tslPort ||
+                bSrc != tallySource || bTaHost != taHost || bTaPort != taPort;
 
   if (!reboot) {
     // Live apply: redraw the current tally with the new brightness / animation and
@@ -1290,6 +1328,7 @@ static void handleSave() {
     if (tslBrightRaw >= 0) tslBrightness = map(tslBrightRaw, 0, 3, 0, maxBrightness);
     setTallyState(tslState, tslBrightness);
     if (eth_connected || wifi_connected) MDNS.addServiceTxt("tally", "tcp", "tsladdr", String(tslAddress));
+    if (tallySource == SOURCE_ARBITER && bTaDevice != taDeviceId) arbiterReconnect();  // register for the new device
     Serial.println("Settings applied without reboot");
     server.sendHeader("Location", "/?saved=1");
     server.send(302, "text/plain", "");
@@ -1389,6 +1428,20 @@ void setupWebServer() {
   });
 
   server.on("/api/wifi-scan", HTTP_GET, handleWifiScan);
+
+  // Find Tally Arbiter servers: they publish _tally-arbiter._tcp over mDNS
+  server.on("/api/ta-scan", HTTP_GET, []() {
+    String json = "{\"servers\":[";
+    if (eth_connected || wifi_connected) {
+      int n = MDNS.queryService("tally-arbiter", "tcp");
+      for (int i = 0; i < n; i++) {
+        if (i) json += ",";
+        json += "{\"host\":" + q(MDNS.hostname(i)) + ",\"ip\":" + q(MDNS.address(i).toString()) + ",\"port\":" + String(MDNS.port(i)) + "}";
+      }
+    }
+    json += "]}";
+    sendJson(json);
+  });
   server.on("/save", HTTP_POST, handleSave);
 
   // Lets the page validate a PIN before using it
@@ -1482,6 +1535,7 @@ void setup() {
   Serial.println("");
 
   ledMutex = xSemaphoreCreateMutex();
+  nvsMutex = xSemaphoreCreateMutex();
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);  // GRB ordering is typical
   FastLED.setBrightness(maxBrightness);
   FastLED.clear();  // clear all pixel data
@@ -1557,12 +1611,17 @@ void setup() {
 
   // Setup UDP multicast listener if we have any network connection
   if (eth_connected || wifi_connected) {
-    // Parse multicast address from string
-    multicastAddress.fromString(tslMulticast);
-    Serial.printf("TSL Multicast: %s:%d\n", multicastAddress.toString().c_str(), tslPort);
+    if (tallySource == SOURCE_ARBITER) {
+      // Tally Arbiter listener task on core 0 (main loop runs on core 1)
+      arbiterStart();
+    } else {
+      // Parse multicast address from string
+      multicastAddress.fromString(tslMulticast);
+      Serial.printf("TSL Multicast: %s:%d\n", multicastAddress.toString().c_str(), tslPort);
 
-    // Start UDP listener task on core 0 (main loop runs on core 1)
-    startUDPTask();
+      // Start UDP listener task on core 0 (main loop runs on core 1)
+      startUDPTask();
+    }
 
     // Start mDNS responder
     startMDNS();
@@ -1652,7 +1711,7 @@ void loop() {
   // Keep the spin animation turning while a tally is active. Disco owns the LEDs
   // while it runs; setTallyState() restarts the spin when it ends.
   static unsigned long lastSpinFrame = 0;
-  if (spinActive && !discoMode && !btnOverride && millis() - lastSpinFrame >= 25) {
+  if (spinActive && !discoMode && !ledOverride && millis() - lastSpinFrame >= 25) {
     lastSpinFrame = millis();
     ledLock();
     if (spinActive) renderSpinFrame(tallyColour, tallyLevel);

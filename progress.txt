@@ -12,6 +12,7 @@ Current Version: 1.1.0
 - [x] Dual-core architecture (Core 0: UDP, Core 1: Web/OTA)
 - [x] WS2812B LED control via FastLED (7 LEDs)
 - [x] Tally states: Off, Green, Red, Yellow, Blue, Magenta, Cyan
+- [x] Tally Arbiter listener mode (socket.io client on core 0, device picker, reassign/flash from TA, mDNS server discovery)
 
 ### Network
 - [x] W5500 SPI Ethernet support

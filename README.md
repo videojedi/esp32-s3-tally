@@ -7,6 +7,7 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 ## Features
 
 - **TSL 3.1 Protocol Support** - Receives multicast UDP tally commands, including brightness
+- **Tally Arbiter listener** - Alternative source: follow a device in a Tally Arbiter server (socket.io, like the stock listener clients)
 - **Dual-Core Processing** - UDP listener runs on core 0 for reliable packet reception
 - **Web Configuration Interface** - Configure all settings via browser
 - **Network Priority** - Ethernet preferred, WiFi fallback, AP mode for configuration
@@ -57,7 +58,7 @@ The W5500 module connects via SPI. These defines must be set before including ET
 Open the device IP or `http://<hostname>.local`. Three tabs:
 
 - **Operation** (default): tally state, TSL text, TSL data counter, test buttons, network device list.
-- **Configuration**: TSL Settings and LED Settings.
+- **Configuration**: Tally Source, TSL Settings or Tally Arbiter, and LED Settings.
 - **System**: device identity, clock and firmware update, Network and WiFi settings, settings lock, factory reset.
 
 The header shows hostname, IP and connection on every tab, and the page background follows the tally colour. An Auto / Light / Dark switch above the tabs sets the page theme (Auto follows the browser or OS setting); the choice is stored in the browser and also applies to native form controls. The last tab used is remembered in the browser; in AP mode the page opens on System. Configuration and System share one form, so Save on either tab saves both.
@@ -66,7 +67,7 @@ The header shows hostname, IP and connection on every tab, and the page backgrou
 
 ### Status
 
-Operation tab: tally state (Off/Green/Red/Yellow), the TSL text label, and **TSL data**: packets received for this device's address, the sender and how long ago the last one arrived. Polled every second. System tab: connection type, IP, hostname, MAC, clock (UTC, from SNTP), settings lock state, firmware version with **Check** / **Install** update buttons. The footer shows the firmware build date and time.
+Operation tab: tally state (Off/Green/Red/Yellow), the TSL text label, and a data line: with the TSL source, packets received for this device's address, the sender and how long ago the last one arrived; with Tally Arbiter, the server, connection state, the assigned device and the update count. Polled every second. System tab: connection type, IP, hostname, MAC, clock (UTC, from SNTP), settings lock state, firmware version with **Check** / **Install** update buttons. The footer shows the firmware build date and time.
 
 ### Test Buttons
 
@@ -89,6 +90,24 @@ Automatically discovers and displays other tally lights on your network:
 ### Disco Mode
 
 Type `disco` anywhere on the page (outside a text field) to run a 30-second rainbow party on this device and every discovered device. Tap **Stop** on the overlay to end it early.
+
+### Tally Source
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Source | `TSL 3.1 (UDP multicast)` or `Tally Arbiter` (reboots) | TSL 3.1 |
+
+### Tally Arbiter
+
+The tally can be a [Tally Arbiter](https://github.com/josephdadams/TallyArbiter) listener client instead of a TSL receiver. It connects to the server over socket.io (port 4455), registers as a listener and follows one of the server's devices: **program lights red, preview green, both yellow**; other bus types (aux) are ignored. Tally Arbiter has no brightness, so Max Brightness applies.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Server | Hostname or IP of the Tally Arbiter server. **Find server** lists servers announcing `_tally-arbiter._tcp` over mDNS (reboots) | |
+| Port | Server port (reboots) | 4455 |
+| Device | The Tally Arbiter device to follow, from the list the server sent. **Refresh device list** re-reads it. `Assign from Tally Arbiter` lets the server pick (its first device); applies live | Assign from Tally Arbiter |
+
+The tally appears in Tally Arbiter's listener list as `Video Walrus <hostname>`. **Reassign** and **Flash** from the producer page work: a reassignment is stored on the tally and survives reboots, a flash blinks the ring white three times and returns to the current state. If the server goes away the ring holds its last state and the Operation tab shows "Not connected"; the tally reconnects on its own when the server is back.
 
 ### TSL Settings
 
@@ -215,11 +234,12 @@ The text label is filtered to printable ASCII and trimmed.
 |----------|--------|-------------|
 | `/` | GET | Configuration page (static; fills itself from `/api/config` and `/status`) |
 | `/status` | GET | JSON status (tally, text, IP, connection, TSL packet count, age and sender) |
-| `/api/config` | GET | JSON of every setting plus hostname, MAC, AP details, firmware and build |
+| `/api/config` | GET | JSON of every setting plus hostname, MAC, AP details, firmware and build; in Tally Arbiter mode also `taDevices` (the server's device list) and `taDeviceName` |
 | `/info` | GET | JSON device info (hostname, MAC, TSL address, firmware, build) |
 | `/test?state=N` | GET | Set tally state (0-3) at max brightness |
 | `/test?restore=1` | GET | Return to the last state received over TSL |
 | `/api/unlock?pin=N` | GET | `{"ok":true}` if the PIN is right, no PIN is set, or the unit is physically unlocked |
+| `/api/ta-scan` | GET | Tally Arbiter servers found over mDNS: `{"servers":[{"host","ip","port"}]}` |
 | `/discover` | GET | Scan network (cached 10 s) and return found tally devices |
 | `/api/wifi-scan` | GET | Start an async WiFi scan (`?start=1`) or return its result; `{"scanning":true}` while running |
 | `/disco?duration=N` | GET | Start disco mode for N seconds (1-120, default 30) |
@@ -248,9 +268,16 @@ In AP mode, the captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, `/conne
   "time": 1788950000,
   "pinSet": false,
   "phys": false,
-  "physLeft": 0
+  "physLeft": 0,
+  "src": 0,
+  "taConn": false,
+  "taHost": "",
+  "taPort": 4455,
+  "taDevice": ""
 }
 ```
+
+`src` is 0 for TSL, 1 for Tally Arbiter; `taConn` and `taDevice` (the device name) describe the Tally Arbiter connection, and `pkts`/`age` then count `device_states` updates from the server.
 
 `pkts` counts packets addressed to this device since boot, `age` is milliseconds since the last one, `from` is its sender. `time` is the SNTP clock (Unix seconds, 0 until synced). `pinSet` says a settings PIN exists, `phys` that the unit was unlocked from its BOOT button, with `physLeft` seconds remaining.
 
@@ -415,7 +442,7 @@ upload_flags =
 
 ### Dual-Core Design
 
-- **Core 0**: UDP listener task - polls for TSL packets every 5ms
+- **Core 0**: the tally source task: the UDP listener (polls for TSL packets every 5 ms) or the Tally Arbiter socket.io client (`src/arbiter.cpp`), whichever the Tally Source setting selects
 - **Core 1**: Main loop - web server, captive-portal DNS, OTA, disco animation, background discovery
 
 This separation ensures reliable multicast reception even when the web interface is active.
@@ -432,6 +459,8 @@ This separation ensures reliable multicast reception even when the web interface
 - ArduinoOTA - Over-the-air updates
 - HTTPClient / WiFiClientSecure / Update - firmware updates from the release manifest over pinned TLS
 - mbedtls (sha256, pk, base64) - firmware signature verification
+- WebSockets (Links2004) - socket.io client for Tally Arbiter
+- ArduinoJson - Tally Arbiter message parsing
 - DNSServer - Captive portal support
 
 ## License

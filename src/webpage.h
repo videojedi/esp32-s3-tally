@@ -91,7 +91,7 @@ footer a{color:var(--accent)}
 <div class="card"><h2>Status</h2><div class="status">
 <div class="status-item"><span>Tally State:</span><span id="tallyState" class="tally-off">Off</span></div>
 <div class="status-item"><span>TSL Text:</span><span id="tallyText">-</span></div>
-<div class="status-item"><span>TSL data:</span><span id="tsl"></span></div>
+<div class="status-item"><span id="tslLabel">TSL data:</span><span id="tsl"></span></div>
 </div></div>
 
 <div class="card"><h2>Test Tally</h2>
@@ -113,14 +113,33 @@ footer a{color:var(--accent)}
 
 <form action="/save" method="POST" id="cfgForm" autocomplete="off" onsubmit="return validateTabs()">
 <div id="tab-cfg" class="panel">
-<div class="card"><h2>TSL Settings</h2>
+<div class="card"><h2>Tally Source</h2>
+<label for="src">Source</label>
+<select id="src" name="src" onchange="toggleSource()"><option value="0">TSL 3.1 (UDP multicast)</option><option value="1">Tally Arbiter</option></select>
+<p class="note">Changing the source reboots the device.</p>
+</div>
+
+<div class="card" id="tslCard"><h2>TSL Settings</h2>
 <label for="tslAddr">TSL Address (0-126)</label>
-<input type="number" id="tslAddr" name="tslAddr" min="0" max="126" required>
+<input type="number" id="tslAddr" name="tslAddr" min="0" max="126">
 <label for="tslMcast">Multicast Address</label>
-<input type="text" id="tslMcast" name="tslMcast" required>
+<input type="text" id="tslMcast" name="tslMcast">
 <label for="tslPort">TSL Port</label>
-<input type="number" id="tslPort" name="tslPort" min="1" max="65535" required>
+<input type="number" id="tslPort" name="tslPort" min="1" max="65535">
 <p class="note">Changing the multicast address or port reboots the device. The address applies as soon as you save.</p>
+</div>
+
+<div class="card hide" id="taCard"><h2>Tally Arbiter</h2>
+<label for="taHost">Server</label>
+<input type="text" id="taHost" name="taHost" placeholder="hostname or IP">
+<button type="button" id="taScanBtn" style="width:100%;margin-top:8px;padding:10px;font-size:14px" onclick="taScan()">Find server</button>
+<div id="taList" class="wifi-list"></div>
+<label for="taPort">Port</label>
+<input type="number" id="taPort" name="taPort" min="1" max="65535">
+<label for="taDevice">Device</label>
+<select id="taDevice" name="taDevice"><option value="unassigned">Assign from Tally Arbiter</option></select>
+<button type="button" id="taRefreshBtn" style="width:100%;margin-top:8px;padding:10px;font-size:14px" onclick="taRefresh()">Refresh device list</button>
+<p class="note">The tally follows this device: program lights red, preview green, both yellow. Reassigning it from Tally Arbiter's producer page also works and is remembered. Changing the server or port reboots the device; changing the device applies as soon as you save.</p>
 </div>
 
 <div class="card"><h2>LED Settings</h2>
@@ -221,7 +240,8 @@ function age(ms){var a=ms/1000;return a<1?'now':a<60?Math.round(a)+'s ago':Math.
 function applyTally(d){if(!d||!d.tally)return;var s=d.tally,c='tally-'+s.toLowerCase();setText('tallyState',s);setClass($('tallyState'),c);if(document.body.className!==c)document.body.className=c;if('text' in d)setText('tallyText',d.text||'-');}
 function applyStatus(s){if(!s)return;applyTally(s);var c=s.connection||'',cls=c.indexOf('Ethernet')>=0?'conn-eth':c.indexOf('WiFi')>=0?'conn-wifi':c.indexOf('AP')>=0?'conn-ap':'';
 setText('conn',c);setClass($('conn'),cls);setText('ip',s.ip||'');setText('hdrIp',s.ip?'\u00b7 '+s.ip:'');setText('hdrConn',c?'\u00b7 '+c:'');setClass($('hdrConn'),cls);
-setText('tsl',s.pkts?s.pkts+' pkts from '+s.from+' \u00b7 '+age(s.age):'No data for this address yet');$('tsl').style.color=s.pkts?'':'var(--muted)';
+var tl;if(s.src==1){setText('tslLabel','Tally Arbiter:');tl=(s.taConn?'Connected to ':'Not connected to ')+s.taHost+':'+s.taPort+(s.taDevice?' \u00b7 '+s.taDevice:' \u00b7 no device')+(s.pkts?' \u00b7 '+s.pkts+' updates \u00b7 '+age(s.age):'');$('tsl').style.color=s.taConn?'':'#ff6b6b';}
+else{setText('tslLabel','TSL data:');tl=s.pkts?s.pkts+' pkts from '+s.from+' \u00b7 '+age(s.age):'No data for this address yet';$('tsl').style.color=s.pkts?'':'var(--muted)';}setText('tsl',tl);
 lock.pinSet=!!s.pinSet;lock.phys=!!s.phys;$('pinclearRow').classList.toggle('hide',!s.pinSet);if(!$('newpin').value)$('newpin').placeholder=s.pinSet?'blank = keep current PIN':'4 to 16 characters, blank = no lock';
 setText('lockst',!s.pinSet?'Off':(s.phys?'Unlocked at the device, '+Math.max(1,Math.ceil(s.physLeft/60))+' min left':'PIN required'));$('lockst').style.color=s.pinSet&&s.phys?'#e0a800':'';
 setText('clk',s.time>1750000000?new Date(s.time*1000).toISOString().replace('T',' ').slice(0,19):'not synced');$('clk').style.color=s.time>1750000000?'':'var(--muted)';}
@@ -241,10 +261,21 @@ setText('hostTitle',c.hostname);setText('host',c.hostname);setText('mac',c.mac);
 $('apRow').classList.toggle('hide',!apMode);setText('apSsid',c.apSsid);
 $('apNote').textContent='If Ethernet and WiFi both fail, the device starts an access point: '+c.apSsid+' (password: '+c.apPass+')';
 $('tslAddr').value=c.tslAddr;$('tslMcast').value=c.mcast;$('tslPort').value=c.port;$('maxBright').value=c.maxBright;$('ledAnim').value=c.ledAnim;
+$('src').value=c.src;$('taHost').value=c.taHost;$('taPort').value=c.taPort;fillDevices(c.taDevices||[],c.taDevice);
 $('hostname').value=c.hostname;$('dhcp').value=c.dhcp?'1':'0';$('sip').value=c.ip;$('gw').value=c.gw;$('sn').value=c.sn;$('dns').value=c.dns;
 $('wifiEn').value=c.wifiEn?'1':'0';$('wifiSSID').value=c.ssid;$('wifiPass').value='';$('wifiPass').placeholder=c.passSet?'(unchanged)':'';lock.pinSet=!!c.pinSet;
 if(apMode){document.querySelectorAll('#cfgForm input').forEach(function(e){if(e.type!=='checkbox')e.readOnly=true;});}
-toggleIP();toggleWifi();whatsNew(c);}).catch(function(){});}
+toggleSource();toggleIP();toggleWifi();whatsNew(c);}).catch(function(){});}
+function fillDevices(list,cur){var sel=$('taDevice'),h='<option value="unassigned">Assign from Tally Arbiter</option>',seen=false;
+list.forEach(function(d){if(!d.id)return;if(d.id===cur)seen=true;h+='<option value="'+esc(d.id)+'">'+esc(d.name||d.id)+'</option>';});
+if(cur&&cur!=='unassigned'&&!seen)h+='<option value="'+esc(cur)+'">'+esc(cur)+' (not on server)</option>';sel.innerHTML=h;sel.value=cur||'unassigned';}
+function taRefresh(){var b=$('taRefreshBtn');b.disabled=true;j('/api/config').then(function(c){fillDevices(c.taDevices||[],$('taDevice').value);b.disabled=false;}).catch(function(){b.disabled=false;});}
+function toggleSource(){var ta=$('src').value==='1';$('tslCard').classList.toggle('hide',ta);$('taCard').classList.toggle('hide',!ta);
+['tslAddr','tslMcast','tslPort'].forEach(function(i){$(i).required=!ta});['taHost','taPort'].forEach(function(i){$(i).required=ta});}
+function taScan(){var l=$('taList'),b=$('taScanBtn');l.classList.add('show');l.innerHTML='<p class="note">Searching...</p>';b.disabled=true;
+j('/api/ta-scan').then(function(d){b.disabled=false;var h='';(d.servers||[]).forEach(function(sv){h+='<div class="wifi-item" onclick="pickTa(this)" data-host="'+esc(sv.ip)+'" data-port="'+sv.port+'"><span>'+esc(sv.host)+'</span><span>'+esc(sv.ip)+':'+sv.port+'</span></div>';});
+l.innerHTML=h||'<p class="note">No Tally Arbiter server found (it announces itself over mDNS while running)</p>';}).catch(function(){b.disabled=false;l.innerHTML='<p class="note">Search failed</p>';});}
+function pickTa(el){$('taHost').value=el.getAttribute('data-host');$('taPort').value=el.getAttribute('data-port');$('taList').classList.remove('show');}
 function applyTheme(t){if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.removeAttribute('data-theme');document.querySelectorAll('.th').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-th')===t)});}
 function setTheme(t){try{localStorage.setItem('theme',t)}catch(e){}applyTheme(t);}
 function showTab(t){document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-tab')===t)});document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('on',p.id==='tab-'+t)});try{localStorage.setItem('tab',t)}catch(e){}}
