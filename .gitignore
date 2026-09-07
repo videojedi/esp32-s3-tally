@@ -8,3 +8,4 @@ old
 .DS_Store
 .env
 dist/
+*.key

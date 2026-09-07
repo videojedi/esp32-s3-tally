@@ -14,7 +14,9 @@
 #define DATA_PIN 16
 #define RESET_BUTTON_PIN 0  // GPIO 0 (BOOT button) for factory reset
 #define WIFI_CONNECT_TIMEOUT 10000  // 10 seconds to connect to WiFi
+#ifndef FIRMWARE_VERSION
 #define FIRMWARE_VERSION "1.1.0"
+#endif
 #define MAX_DISCOVERED_DEVICES 16
 
 // W5500 SPI Ethernet configuration - MUST be defined BEFORE including ETH.h
@@ -38,16 +40,33 @@
 #include <WiFiClientSecure.h>
 #include <Update.h>
 #include "webpage.h"
+#include <time.h>
+#include <mbedtls/sha256.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/base64.h>
+#include "certs.h"
+#include "signing_key.h"
 
-// OTA update manifest published by release.sh (see otaCheck)
+// OTA update manifest published by release.sh (see otaCheck). A build flag can override
+// the URL so a test build points at a test manifest.
+#ifndef MANIFEST_URL
 #define MANIFEST_URL "https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-update.json"
+#endif
 #define OTA_MAX_NOTES 8
+#define OTA_MIN_EPOCH 1750000000UL  // mid 2025; anything earlier means SNTP has not run
+#define OTA_STALL_MS  30000
+
+// BOOT button timing (see buttonTick)
+#define BTN_UNLOCK_MS    3000
+#define BTN_FAST_FROM_MS 7000
+#define BTN_RESET_MS     10000
+#define UNLOCK_WINDOW_MS (10UL * 60UL * 1000UL)
 
 // Forward declarations
 void loadSettings();
 void saveSettings();
 void resetSettings();
-void checkResetButton();
+void buttonTick();
 void onEvent(arduino_event_id_t event);
 void setupWebServer();
 bool udpTSL(char *data);
@@ -81,6 +100,7 @@ int tslAddress = 0;
 int maxBrightness = 50;  // Max brightness (0-255), TSL brightness maps to this
 enum LedAnimation { LED_ANIM_SOLID = 0, LED_ANIM_SPIN = 1 };
 int ledAnimation = LED_ANIM_SOLID;  // How an active tally is drawn on the ring
+String settingsPin = "";  // Settings lock PIN, "" = no lock
 int tslPort = 8901;      // TSL multicast port
 String tslMulticast = "239.1.2.3";  // TSL multicast address
 bool useDHCP = true;
@@ -157,7 +177,10 @@ unsigned long lastDiscoveryScan = 0;
 String latestVersion = "";
 String firmwareURL = "";
 String firmwareMD5 = "";
+String firmwareSHA256 = "";
+String firmwareSig = "";
 String releaseDate = "";
+String otaLastError = "";  // why the last check or install failed, "" if it did not
 String otaNotes[OTA_MAX_NOTES];
 int otaNoteCount = 0;
 bool updateAvailable = false;
@@ -179,6 +202,7 @@ void loadSettings() {
   tslAddress = preferences.getInt("tslAddress", 0);
   maxBrightness = preferences.getInt("maxBright", 50);
   ledAnimation = preferences.getInt("ledAnim", LED_ANIM_SOLID);
+  settingsPin = preferences.getString("pin", "");
   tslPort = preferences.getInt("tslPort", 8901);
   tslMulticast = preferences.getString("tslMcast", "239.1.2.3");
   useDHCP = preferences.getBool("useDHCP", true);
@@ -198,6 +222,7 @@ void loadSettings() {
   Serial.printf("  TSL Port: %d\n", tslPort);
   Serial.printf("  Max Brightness: %d\n", maxBrightness);
   Serial.printf("  LED Animation: %s\n", ledAnimation == LED_ANIM_SPIN ? "Spin" : "Solid");
+  Serial.printf("  Settings lock: %s\n", settingsPin.length() ? "PIN set" : "off");
   Serial.printf("  DHCP: %s\n", useDHCP ? "Yes" : "No");
   if (!useDHCP) {
     Serial.printf("  Static IP: %s\n", staticIP.c_str());
@@ -218,6 +243,7 @@ void saveSettings() {
   preferences.putInt("tslAddress", tslAddress);
   preferences.putInt("maxBright", maxBrightness);
   preferences.putInt("ledAnim", ledAnimation);
+  preferences.putString("pin", settingsPin);
   preferences.putInt("tslPort", tslPort);
   preferences.putString("tslMcast", tslMulticast);
   preferences.putBool("useDHCP", useDHCP);
@@ -244,6 +270,7 @@ void resetSettings() {
   tslAddress = 0;
   maxBrightness = 50;
   ledAnimation = LED_ANIM_SOLID;
+  settingsPin = "";
   tslPort = 8901;
   tslMulticast = "239.1.2.3";
   useDHCP = true;
@@ -255,6 +282,49 @@ void resetSettings() {
   wifiSSID = "";
   wifiPassword = "";
   wifiEnabled = false;
+}
+
+// ---- Settings lock ----
+// An optional PIN gates changes from the network; reads stay open. Holding BOOT on the
+// unit for 3 s unlocks for a while without the PIN: anyone at the box can already reflash
+// it over USB, so the lock is against accidents and the curious on the LAN, not against
+// physical access.
+static uint32_t unlockUntil = 0;
+
+bool lockPinSet() { return settingsPin.length() > 0; }
+
+bool lockPhysicallyUnlocked() {
+  return unlockUntil != 0 && (int32_t)(unlockUntil - millis()) > 0;
+}
+
+uint32_t lockPhysicalRemainingMs() {
+  return lockPhysicallyUnlocked() ? unlockUntil - millis() : 0;
+}
+
+void lockPhysicalUnlock(uint32_t ms) { unlockUntil = millis() + ms; }
+
+// Compare without leaking length or position through timing. Overkill for a LAN PIN, cheap anyway.
+static bool pinEquals(const String& a, const String& b) {
+  uint8_t diff = a.length() != b.length();
+  for (size_t i = 0; i < a.length() && i < b.length(); i++) diff |= a[i] ^ b[i];
+  return diff == 0;
+}
+
+// No PIN configured, physically unlocked, or the PIN matches
+bool lockAuthorised(const String& pin) {
+  if (!lockPinSet()) return true;
+  if (lockPhysicallyUnlocked()) return true;
+  return pin.length() > 0 && pinEquals(pin, settingsPin);
+}
+
+// Printable, no spaces, max 16; "" if shorter than 4
+String lockSanitisePin(const String& s) {
+  String out;
+  for (size_t i = 0; i < s.length() && out.length() < 16; i++) {
+    char c = s[i];
+    if (c > 32 && c < 127) out += c;
+  }
+  return out.length() >= 4 ? out : String();
 }
 
 // ---- LED ring animation ----
@@ -312,33 +382,53 @@ void spinDelay(CRGB colour, unsigned long ms) {
   } while (millis() - start < ms);
 }
 
-// Check if reset button is held during boot
-void checkResetButton() {
-  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+// ---- BOOT button ----
+// Polled from loop(); GPIO 0 is readable once the firmware is running. Hold 3 s: the ring
+// blinks red, release to unlock the settings for UNLOCK_WINDOW_MS without the PIN. Keep
+// holding: the blink speeds up at 7 s and the settings are erased at 10 s (blue), then
+// the unit reboots. Release before 10 s and nothing is erased. Do not hold BOOT while
+// powering on or pressing RESET: GPIO 0 low at reset enters the USB bootloader instead.
+static uint32_t btnDownMs = 0;
+static bool btnArmed = false;
+static volatile bool btnOverride = false;  // ring shows the countdown; setTallyState() waits
 
+void buttonTick() {
+  uint32_t now = millis();
   if (digitalRead(RESET_BUTTON_PIN) == LOW) {
-    Serial.println("Reset button pressed, hold for 3 seconds to reset...");
-    unsigned long startTime = millis();
-
-    // Flash LEDs to indicate reset mode
-    while (digitalRead(RESET_BUTTON_PIN) == LOW) {
-      if (millis() - startTime > 3000) {
-        Serial.println("Resetting to factory defaults!");
-        fill_solid(leds, NUM_LEDS, CRGB::Blue);
-        FastLED.show();
-        resetSettings();
-        delay(1000);
-        fill_solid(leds, NUM_LEDS, CRGB::Black);
-        FastLED.show();
-        break;
-      }
-      // Blink red while waiting
-      fill_solid(leds, NUM_LEDS, ((millis() / 200) % 2) ? CRGB::Red : CRGB::Black);
-      FastLED.show();
-      delay(50);
+    if (!btnDownMs) { btnDownMs = now; btnArmed = false; }
+    uint32_t held = now - btnDownMs;
+    if (held < BTN_UNLOCK_MS) return;
+    if (!btnArmed) {
+      btnArmed = true;
+      btnOverride = true;
+      Serial.println("[Button] Held 3 s: release to unlock settings, keep holding for factory reset");
     }
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    if (held >= BTN_RESET_MS) {
+      Serial.println("[Button] Held 10 s: factory reset");
+      ledLock();
+      FastLED.setBrightness(maxBrightness);
+      fill_solid(leds, NUM_LEDS, CRGB::Blue);
+      FastLED.show();
+      ledUnlock();
+      resetSettings();
+      delay(1000);
+      ESP.restart();
+    }
+    uint32_t period = held < BTN_FAST_FROM_MS ? 400 : 120;  // red countdown, faster near the end
+    ledLock();
+    FastLED.setBrightness(maxBrightness);
+    fill_solid(leds, NUM_LEDS, ((now / period) % 2) ? CRGB::Red : CRGB::Black);
     FastLED.show();
+    ledUnlock();
+  } else if (btnDownMs) {
+    btnDownMs = 0;
+    if (btnArmed) {
+      btnArmed = false;
+      btnOverride = false;
+      lockPhysicalUnlock(UNLOCK_WINDOW_MS);
+      Serial.printf("[Button] Settings unlocked for %lu minutes\n", UNLOCK_WINDOW_MS / 60000UL);
+      setTallyState(tslState, tslBrightness);  // back to the tally
+    }
   }
 }
 
@@ -540,8 +630,8 @@ void setTallyState(int state, int brightness) {
   tallyColour = colour;
   tallyLevel = brightness < 0 ? maxBrightness : brightness;
   spinActive = (ledAnimation == LED_ANIM_SPIN && state != 0);
-  if (updateInProgress) {
-    // otaInstall() owns the LEDs; the state is redrawn when it finishes or fails
+  if (updateInProgress || btnOverride) {
+    // otaInstall() or the BOOT button owns the LEDs; the state is redrawn when they finish
   } else if (spinActive) {
     renderSpinFrame(tallyColour, tallyLevel);
   } else {
@@ -747,9 +837,15 @@ void discoverTallyDevices() {
 }
 
 // ---- OTA updates from the release manifest ----
-// release.sh uploads the binary and this manifest to S3:
-//   {"version":"1.1.0","url":"https://.../tsl-tally-1.1.0.bin","md5":"...","size":1300000,
+// release.sh signs every binary and uploads it with this manifest to S3:
+//   {"version":"1.2.0","url":"https://.../tsl-tally-1.2.0.bin","md5":"...","sha256":"...",
+//    "sig":"<base64 DER ECDSA-SHA256 over the binary>","size":1300000,
 //    "release_date":"2026-09-07","notes":["...","..."]}
+// Manifest and binary are fetched over TLS validated against Amazon's root CAs (certs.h),
+// which needs the clock set. The binary is hashed as it streams into the passive partition
+// and the signature is checked against signing_key.h before the image is marked bootable.
+
+bool otaClockValid() { return time(nullptr) > (time_t)OTA_MIN_EPOCH; }
 
 // True if v2 is newer than v1 ("v" prefix optional)
 bool isNewerVersion(const String& v1, const String& v2) {
@@ -804,19 +900,34 @@ static void parseNotes(const String& j) {
   }
 }
 
+static String httpError(int code) {
+  if (code > 0) return "HTTP " + String(code);
+  // Negative codes are HTTPClient failures. A refused connection here is usually the
+  // TLS handshake: wrong certificate chain, or the clock too far off for the dates.
+  return String("Connection failed (") + HTTPClient::errorToString(code) + ")";
+}
+
 // Fetch the manifest and compare its version with ours
 void otaCheck() {
+  otaLastError = "";
+  updateAvailable = false;
   if (!eth_connected && !wifi_connected) {
-    Serial.println("[Update] No network connection");
+    otaLastError = "No network connection";
+    Serial.println("[Update] " + otaLastError);
+    return;
+  }
+  if (!otaClockValid()) {
+    otaLastError = "Clock not set yet (no time server reachable), cannot validate the server certificate";
+    Serial.println("[Update] " + otaLastError);
     return;
   }
   Serial.println("[Update] Fetching release manifest...");
 
   WiFiClientSecure client;
-  client.setInsecure();  // S3 certificate chain is not verified
+  client.setCACert(AMAZON_ROOT_CAS);
+  client.setHandshakeTimeout(15);
 
   HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(10000);
   http.begin(client, String(MANIFEST_URL) + "?t=" + String(millis()));  // defeat caches
   http.addHeader("User-Agent", "ESP32-Tally-OTA");
@@ -826,80 +937,143 @@ void otaCheck() {
 
   if (code == 200) {
     String payload = http.getString();
-    latestVersion = jsonString(payload, "version");
-    firmwareURL   = jsonString(payload, "url");
-    firmwareMD5   = jsonString(payload, "md5");
-    releaseDate   = jsonString(payload, "release_date");
+    latestVersion  = jsonString(payload, "version");
+    firmwareURL    = jsonString(payload, "url");
+    firmwareMD5    = jsonString(payload, "md5");
+    firmwareSHA256 = jsonString(payload, "sha256");
+    firmwareSig    = jsonString(payload, "sig");
+    releaseDate    = jsonString(payload, "release_date");
     parseNotes(payload);
-    Serial.printf("[Update] Latest: %s, Current: %s, %d notes\n", latestVersion.c_str(), FIRMWARE_VERSION, otaNoteCount);
+    Serial.printf("[Update] Latest: %s, Current: %s, %d notes, %s\n", latestVersion.c_str(), FIRMWARE_VERSION,
+                  otaNoteCount, firmwareSig.length() ? "signed" : "UNSIGNED");
 
-    updateAvailable = latestVersion.length() > 0 && firmwareURL.startsWith("https://") &&
-                      isNewerVersion(FIRMWARE_VERSION, latestVersion);
+    bool newer = latestVersion.length() > 0 && isNewerVersion(FIRMWARE_VERSION, latestVersion);
+    bool usable = firmwareURL.startsWith("https://") && firmwareSig.length() > 0 && firmwareSHA256.length() == 64;
+    if (newer && !usable) otaLastError = "A newer release exists but its manifest is not signed, refusing it";
+    updateAvailable = newer && usable;
     Serial.println(updateAvailable ? "[Update] New version available" : "[Update] Firmware is up to date");
   } else {
-    Serial.printf("[Update] Check failed: %d\n", code);
+    otaLastError = httpError(code);
+    Serial.println("[Update] Check failed: " + otaLastError);
   }
   http.end();
 }
 
-// Download the binary from the manifest URL and flash it. The manifest MD5 is checked
-// by Update.end() before the new image is accepted.
-void otaInstall() {
-  if (firmwareURL.length() == 0) {
-    Serial.println("[Update] No firmware URL");
-    return;
-  }
-  if (updateInProgress) return;
-  updateInProgress = true;  // setTallyState() leaves the LEDs alone until this clears
-  Serial.printf("[Update] Downloading %s\n", firmwareURL.c_str());
+static void otaFail(const String& why) {
+  otaLastError = why;
+  Serial.println("[Update] " + why);
+  Update.abort();
+}
 
+static void otaShow(CRGB colour) {
   ledLock();
   FastLED.setBrightness(maxBrightness);
-  fill_solid(leds, NUM_LEDS, CRGB::Purple);  // purple while updating
+  fill_solid(leds, NUM_LEDS, colour);
   FastLED.show();
   ledUnlock();
+}
+
+// Download the binary named in the manifest, verify it, flash it, reboot
+void otaInstall() {
+  if (updateInProgress) return;
+  if (firmwareURL.length() == 0) { otaLastError = "No release to install, run a check first"; return; }
+  if (firmwareSig.length() == 0 || firmwareSHA256.length() != 64) { otaLastError = "Release is not signed"; return; }
+
+  uint8_t sig[128];
+  size_t  sigLen = 0;
+  if (mbedtls_base64_decode(sig, sizeof(sig), &sigLen, (const uint8_t*)firmwareSig.c_str(), firmwareSig.length()) != 0) {
+    otaLastError = "Signature in manifest is not valid base64";
+    return;
+  }
+
+  updateInProgress = true;  // setTallyState() leaves the LEDs alone until this clears
+  otaLastError = "";
+  Serial.printf("[Update] Downloading %s\n", firmwareURL.c_str());
+  otaShow(CRGB::Purple);
 
   WiFiClientSecure client;
-  client.setInsecure();
+  client.setCACert(AMAZON_ROOT_CAS);
+  client.setHandshakeTimeout(15);
 
   HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(60000);
   http.begin(client, firmwareURL);
 
+  bool ok = false;
   int code = http.GET();
   Serial.printf("[Update] Download response: %d\n", code);
 
-  if (code == 200) {
+  do {
+    if (code != 200) { otaFail("Download failed: " + httpError(code)); break; }
     int len = http.getSize();
     Serial.printf("[Update] Firmware size: %d bytes\n", len);
-    if (len > 0 && Update.begin(len)) {
-      if (firmwareMD5.length() == 32) Update.setMD5(firmwareMD5.c_str());
-      size_t written = Update.writeStream(client);
-      Serial.printf("[Update] Written: %u bytes\n", (unsigned)written);
-      if (Update.end() && Update.isFinished()) {
-        Serial.println("[Update] Success, rebooting...");
-        ledLock();
-        fill_solid(leds, NUM_LEDS, CRGB::Green);
-        FastLED.show();
-        ledUnlock();
-        delay(1000);
-        ESP.restart();
-      } else {
-        Serial.printf("[Update] Error: %s\n", Update.errorString());
+    if (len <= 0) { otaFail("Server did not report a size"); break; }
+    if (!Update.begin(len)) { otaFail(String("Cannot begin update: ") + Update.errorString()); break; }
+    if (firmwareMD5.length() == 32) Update.setMD5(firmwareMD5.c_str());
+
+    // Stream to the passive partition while hashing. Nothing is bootable until Update.end().
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    NetworkClient* stream = http.getStreamPtr();
+    static uint8_t buf[2048];
+    size_t total = 0;
+    uint32_t lastData = millis();
+    bool streamOk = true;
+    while (total < (size_t)len) {
+      size_t avail = stream->available();
+      if (avail == 0) {
+        if (!stream->connected() && stream->available() == 0) { streamOk = false; break; }
+        if (millis() - lastData > OTA_STALL_MS) { streamOk = false; break; }
+        delay(1);
+        continue;
       }
-    } else {
-      Serial.printf("[Update] Cannot begin update: %s\n", Update.errorString());
+      int n = stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
+      if (n <= 0) continue;
+      mbedtls_sha256_update(&sha, buf, n);
+      if (Update.write(buf, n) != (size_t)n) { streamOk = false; break; }
+      total += n;
+      lastData = millis();
     }
-  }
+    uint8_t hash[32];
+    mbedtls_sha256_finish(&sha, hash);
+    mbedtls_sha256_free(&sha);
+    Serial.printf("[Update] Received %u of %d bytes\n", (unsigned)total, len);
+    if (!streamOk || total != (size_t)len) { otaFail("Download incomplete or stalled"); break; }
+
+    char hex[65];
+    for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", hash[i]);
+    if (!firmwareSHA256.equalsIgnoreCase(hex)) { otaFail("SHA-256 does not match the manifest"); break; }
+
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    int rc = mbedtls_pk_parse_public_key(&pk, (const uint8_t*)FIRMWARE_SIGNING_PUBKEY, strlen(FIRMWARE_SIGNING_PUBKEY) + 1);
+    if (rc == 0) rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash), sig, sigLen);
+    mbedtls_pk_free(&pk);
+    if (rc != 0) {
+      char why[64];
+      snprintf(why, sizeof(why), "Signature verification FAILED (mbedtls -0x%04x), image rejected", -rc);
+      otaFail(why);
+      break;
+    }
+    Serial.println("[Update] Signature verified");
+
+    if (!Update.end() || !Update.isFinished()) { otaFail(String("Flash finalise failed: ") + Update.errorString()); break; }
+    ok = true;
+  } while (false);
+
   http.end();
+
+  if (ok) {
+    Serial.println("[Update] Success, rebooting...");
+    otaShow(CRGB::Green);
+    delay(1000);
+    ESP.restart();
+  }
   updateInProgress = false;
 
-  // Failed: show red for two seconds, then back to the current tally
-  ledLock();
-  fill_solid(leds, NUM_LEDS, CRGB::Red);
-  FastLED.show();
-  ledUnlock();
+  // Failed: red for two seconds, then back to the current tally
+  otaShow(CRGB::Red);
   delay(2000);
   setTallyState(tslState, tslBrightness);
 }
@@ -1001,7 +1175,10 @@ static String statusJson() {
   j += ",\"ip\":" + q(getActiveIP()) + ",\"connection\":" + q(getConnectionStatus());
   j += ",\"pkts\":" + String((unsigned long)tslPackets);
   j += ",\"age\":" + String(tslLastMs ? (unsigned long)(millis() - tslLastMs) : 0UL);
-  j += ",\"from\":" + q(IPAddress((uint32_t)tslLastFrom).toString()) + "}";
+  j += ",\"from\":" + q(IPAddress((uint32_t)tslLastFrom).toString());
+  j += ",\"time\":" + String((unsigned long)time(nullptr));
+  j += ",\"pinSet\":" + b(lockPinSet()) + ",\"phys\":" + b(lockPhysicallyUnlocked());
+  j += ",\"physLeft\":" + String((unsigned long)(lockPhysicalRemainingMs() / 1000)) + "}";
   return j;
 }
 
@@ -1011,7 +1188,8 @@ static String configJson() {
   j += "\"hostname\":" + q(deviceHostname) + ",";
   j += "\"dhcp\":" + b(useDHCP) + ",";
   j += "\"ip\":" + q(staticIP) + ",\"gw\":" + q(gateway) + ",\"sn\":" + q(subnet) + ",\"dns\":" + q(dns) + ",";
-  j += "\"wifiEn\":" + b(wifiEnabled) + ",\"ssid\":" + q(wifiSSID) + ",\"pass\":" + q(wifiPassword) + ",";
+  j += "\"wifiEn\":" + b(wifiEnabled) + ",\"ssid\":" + q(wifiSSID) + ",\"passSet\":" + b(wifiPassword.length() > 0) + ",";
+  j += "\"pinSet\":" + b(lockPinSet()) + ",";
   j += "\"tslAddr\":" + String(tslAddress) + ",\"mcast\":" + q(tslMulticast) + ",\"port\":" + String(tslPort) + ",";
   j += "\"maxBright\":" + String(maxBrightness) + ",\"ledAnim\":" + String(ledAnimation) + ",";
   j += "\"apMode\":" + b(ap_mode) + ",\"apSsid\":" + q(ap_mode ? apSSID : String("Tally-XXXXXX-Setup")) + ",\"apPass\":" + q(apPassword) + ",";
@@ -1042,9 +1220,26 @@ static bool validIP(const String& s) {
   return ip.fromString(s);
 }
 
+// Changes need the PIN (query or form field "pin") unless no PIN is set or the unit was
+// unlocked with its BOOT button. Reads never need it.
+static bool authorised() { return lockAuthorised(server.arg("pin")); }
+static bool requireAuthJson() {
+  if (authorised()) return true;
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(401, "application/json", "{\"error\":\"locked\"}");
+  return false;
+}
+static bool requireAuthPage() {
+  if (authorised()) return true;
+  server.send(401, "text/html", messagePage("Settings Locked",
+              "<p>Wrong or missing PIN. Nothing was changed.</p><p><a href=\"/\">Back</a></p>", "#c00"));
+  return false;
+}
+
 // Save from the web form. Settings that only take effect at boot (network, WiFi,
 // hostname, TSL socket) reboot the device; the rest apply at once.
 static void handleSave() {
+  if (!requireAuthPage()) return;
   String bHost = deviceHostname, bIP = staticIP, bGW = gateway, bSN = subnet, bDNS = dns;
   String bSSID = wifiSSID, bPass = wifiPassword, bMcast = tslMulticast;
   bool bDHCP = useDHCP, bWifi = wifiEnabled;
@@ -1073,7 +1268,15 @@ static void handleSave() {
 
   if (server.hasArg("wifiEn")) wifiEnabled = server.arg("wifiEn") == "1";
   if (server.hasArg("wifiSSID")) wifiSSID = server.arg("wifiSSID");
-  if (server.hasArg("wifiPass")) wifiPassword = server.arg("wifiPass");
+  if (server.hasArg("passclear")) wifiPassword = "";  // open network
+  else if (server.hasArg("wifiPass") && server.arg("wifiPass").length()) wifiPassword = server.arg("wifiPass");  // blank = keep
+
+  // Settings lock
+  if (server.hasArg("pinclear")) settingsPin = "";
+  else if (server.hasArg("newpin") && server.arg("newpin").length()) {
+    String np = lockSanitisePin(server.arg("newpin"));
+    if (np.length()) settingsPin = np;
+  }
 
   saveSettings();
 
@@ -1143,6 +1346,7 @@ void setupWebServer() {
 
   // Test tally endpoint - with CORS for cross-device control
   server.on("/test", HTTP_GET, []() {
+    if (!requireAuthJson()) return;
     if (server.hasArg("restore")) {
       setTallyState(tslState, tslBrightness);  // back to what the switcher last sent
     } else if (server.hasArg("state")) {
@@ -1187,8 +1391,14 @@ void setupWebServer() {
   server.on("/api/wifi-scan", HTTP_GET, handleWifiScan);
   server.on("/save", HTTP_POST, handleSave);
 
+  // Lets the page validate a PIN before using it
+  server.on("/api/unlock", HTTP_GET, []() {
+    sendJson(String("{\"ok\":") + b(authorised()) + ",\"pinSet\":" + b(lockPinSet()) + "}", true);
+  });
+
   // Reset to factory defaults
   server.on("/reset", HTTP_GET, []() {
+    if (!requireAuthPage()) return;
     resetSettings();
     server.send(200, "text/html", messagePage("Factory Reset Complete",
                 "<p>All settings have been reset to defaults.</p><p>Device is rebooting...</p>", "#c00"));
@@ -1204,14 +1414,22 @@ void setupWebServer() {
     json += "\"updateAvailable\":" + b(updateAvailable) + ",";
     json += "\"firmwareURL\":" + q(firmwareURL) + ",";
     json += "\"date\":" + q(releaseDate) + ",";
+    json += "\"error\":" + q(otaLastError) + ",";
+    json += "\"clock\":" + b(otaClockValid()) + ",";
     json += "\"notes\":[";
     for (int i = 0; i < otaNoteCount; i++) { if (i) json += ","; json += q(otaNotes[i]); }
     json += "]}";
     sendJson(json);
   });
 
-  // Download and install the firmware from the manifest
+  // Progress of an install: the page polls this until fw changes or error is set
+  server.on("/api/update-status", HTTP_GET, []() {
+    sendJson("{\"fw\":" + q(FIRMWARE_VERSION) + ",\"inProgress\":" + b(updateInProgress) + ",\"error\":" + q(otaLastError) + "}", true);
+  });
+
+  // Download, verify and install the firmware from the manifest
   server.on("/api/update", HTTP_GET, []() {
+    if (!requireAuthJson()) return;
     if (!updateAvailable || firmwareURL.length() == 0) {
       server.send(400, "application/json", "{\"error\":\"No update available\"}");
       return;
@@ -1223,6 +1441,7 @@ void setupWebServer() {
 
   // Secret disco mode endpoint - with CORS for cross-device sync
   server.on("/disco", HTTP_GET, []() {
+    if (!requireAuthJson()) return;
     int duration = 30;  // Default 30 seconds
     if (server.hasArg("duration")) {
       duration = constrain(server.arg("duration").toInt(), 1, 120);
@@ -1235,6 +1454,7 @@ void setupWebServer() {
 
   // Stop disco mode - with CORS for cross-device sync
   server.on("/disco-stop", HTTP_GET, []() {
+    if (!requireAuthJson()) return;
     discoMode = false;
     Serial.println("[DISCO] Party stopped by request!");
     setTallyState(tslState, tslBrightness);  // back to what the switcher last sent
@@ -1267,8 +1487,7 @@ void setup() {
   FastLED.clear();  // clear all pixel data
   FastLED.show();
 
-  // Check for factory reset (hold BOOT button for 3 seconds)
-  checkResetButton();
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);  // BOOT button, polled by buttonTick()
 
   // Load settings from NVS
   loadSettings();
@@ -1348,6 +1567,9 @@ void setup() {
     // Start mDNS responder
     startMDNS();
 
+    // Clock for TLS certificate dates when checking for updates
+    configTzTime("UTC0", "pool.ntp.org", "time.cloudflare.com", "time.google.com");
+
     // Run LED test to indicate successful network connection
     testLED();
   } else {
@@ -1396,6 +1618,8 @@ void setup() {
 }
 
 void loop() {
+  buttonTick();
+
   // Handle DNS requests for captive portal (AP mode only)
   if (ap_mode) {
     dnsServer.processNextRequest();
@@ -1428,7 +1652,7 @@ void loop() {
   // Keep the spin animation turning while a tally is active. Disco owns the LEDs
   // while it runs; setTallyState() restarts the spin when it ends.
   static unsigned long lastSpinFrame = 0;
-  if (spinActive && !discoMode && millis() - lastSpinFrame >= 25) {
+  if (spinActive && !discoMode && !btnOverride && millis() - lastSpinFrame >= 25) {
     lastSpinFrame = millis();
     ledLock();
     if (spinActive) renderSpinFrame(tallyColour, tallyLevel);

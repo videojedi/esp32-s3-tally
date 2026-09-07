@@ -142,6 +142,8 @@ footer a{color:var(--accent)}
 <div class="status-item"><span>IP Address:</span><span id="ip"></span></div>
 <div class="status-item"><span>Hostname:</span><span id="host"></span></div>
 <div class="status-item"><span>MAC:</span><span id="mac"></span></div>
+<div class="status-item"><span>Clock (UTC):</span><span id="clk"></span></div>
+<div class="status-item"><span>Settings lock:</span><span id="lockst"></span></div>
 <div class="status-item hide" id="apRow"><span>AP SSID:</span><span id="apSsid"></span></div>
 <div class="status-item"><span>Firmware:</span><span><span id="fw"></span><button type="button" class="small" onclick="checkUpdate()">Check</button></span></div>
 <div class="status-item hide" id="updateNotice"><span style="color:#ff6b6b">Update available:</span><span><span id="latest" style="color:#ff6b6b"></span><button type="button" class="small" style="background:#4CAF50;color:#fff" onclick="installUpdate()">Install</button></span></div>
@@ -168,17 +170,28 @@ footer a{color:var(--accent)}
 <label for="wifiSSID">WiFi SSID</label><input type="text" id="wifiSSID" name="wifiSSID" maxlength="32">
 <button type="button" id="scanBtn" style="width:100%;margin-top:8px;padding:10px;font-size:14px" onclick="wifiScan()">Scan for Networks</button>
 <div id="wifiList" class="wifi-list"></div>
-<label for="wifiPass">WiFi Password</label><input type="text" class="masked" id="wifiPass" name="wifiPass" maxlength="64" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-<label class="chk"><input type="checkbox" id="showPass" onchange="$('wifiPass').classList.toggle('masked',!this.checked)"> Show password</label>
+<label for="wifiPass">WiFi Password</label><input type="text" class="masked" id="wifiPass" name="wifiPass" maxlength="64" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="typing('wifiPass','showPassRow','showPass')">
+<label class="chk hide" id="showPassRow"><input type="checkbox" id="showPass" onchange="$('wifiPass').classList.toggle('masked',!this.checked)"> Show while typing</label>
+<label class="chk"><input type="checkbox" id="passclear" name="passclear" value="1"> Network has no password</label>
+<p class="note">The stored password is never shown. Leave the field blank to keep it.</p>
 </div>
 <p class="note" id="apNote"></p>
 </div>
+
+<div class="card"><h2>Settings Lock</h2>
+<label for="newpin">PIN</label>
+<input type="text" id="newpin" name="newpin" class="masked" maxlength="16" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="4 to 16 characters, blank = no lock" oninput="typing('newpin','showPinRow','showPin')">
+<label class="chk hide" id="showPinRow"><input type="checkbox" id="showPin" onchange="$('newpin').classList.toggle('masked',!this.checked)"> Show while typing</label>
+<label class="chk hide" id="pinclearRow"><input type="checkbox" id="pinclear" name="pinclear" value="1"> Remove lock</label>
+<p class="note">With a PIN set, Save, Reset Defaults, firmware Install, the test buttons and disco ask for it once per browser session. Status stays visible to everyone. Bulk buttons send this PIN to the other tallies, so use the same PIN across them. Forgotten PIN: hold BOOT on the unit for 3 seconds to unlock it for 10 minutes, or 10 seconds to factory reset.</p>
+</div>
+<input type="hidden" id="pinField" name="pin">
 
 <div class="btns"><button type="submit" style="flex:2">Save</button><button type="button" style="flex:1;background:#c00;color:#fff" onclick="resetDefaults()">Reset Defaults</button></div>
 <p class="note" style="text-align:center">Saving applies Configuration and System together. Network changes reboot the device.</p>
 </div>
 </form>
-<div class="ovl" id="ovl" onclick="if(event.target===this)closeModal()"><div class="modal" role="dialog" aria-modal="true"><h3 id="mTitle"></h3><div class="d" id="mDate"></div><ul id="mNotes"></ul><p id="mText" class="hide"></p><div class="btns" id="mBtns"></div></div></div>
+<div class="ovl" id="ovl" onclick="if(event.target===this)closeModal()"><div class="modal" role="dialog" aria-modal="true"><h3 id="mTitle"></h3><div class="d" id="mDate"></div><ul id="mNotes"></ul><p id="mText" class="hide"></p><input type="text" id="mPin" class="masked hide" maxlength="16" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="margin-bottom:14px"><div class="btns" id="mBtns"></div></div></div>
 <footer>&copy; 2026 <a href="https://videowalrus.com">Video Walrus</a> &middot; <span id="build"></span></footer>
 </div>
 <div id="discoOverlay" class="disco-overlay"><div class="disco-text">DISCO MODE<br>ACTIVATED</div><button type="button" class="disco-cancel" onclick="stopDisco()">STOP THE PARTY</button></div>
@@ -187,6 +200,20 @@ var apMode=false,roMode=false,curFw='',devices=[],upd=null,testHeld=0;
 function $(i){return document.getElementById(i)}
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return '&#'+c.charCodeAt(0)+';'})}
 function j(u){return fetch(u).then(function(r){return r.json()})}
+var lock={pinSet:false,phys:false};
+function getPin(){try{return sessionStorage.getItem('pin')||''}catch(e){return ''}}
+function setPin(v){try{if(v)sessionStorage.setItem('pin',v);else sessionStorage.removeItem('pin')}catch(e){}}
+function needPin(){return lock.pinSet&&!lock.phys&&!getPin()}
+function addPin(u,p){return p?u+(u.indexOf('?')>=0?'&':'?')+'pin='+encodeURIComponent(p):u}
+function withPin(u){if(!lock.pinSet||lock.phys)return u;return addPin(u,getPin())}
+function withPinAny(u){return addPin(u,getPin())}
+function askPin(then,msg){showModal(msg?'Confirm PIN':'Settings locked','',null,msg||'Enter the PIN to continue.',[['Unlock',function(){go()},''],['Cancel',closeModal,'background:var(--field);color:var(--text)']]);
+var f=$('mPin');f.classList.remove('hide');f.value='';f.placeholder='PIN';setTimeout(function(){f.focus()},50);
+function go(){var v=f.value;if(!v)return;j('/api/unlock?pin='+encodeURIComponent(v)).then(function(r){if(r.ok){setPin(v);closeModal();then();}else{f.value='';f.placeholder='Wrong PIN, try again';}}).catch(function(){});}
+f.onkeydown=function(e){if(e.key==='Enter'){e.preventDefault();go();}};}
+function guarded(fn){if(needPin())askPin(fn);else fn();}
+function jp(u){return j(withPin(u)).then(function(r){if(r&&r.error==='locked'){setPin('');askPin(function(){});throw 'locked';}return r;})}
+function typing(f,row,cb){var has=$(f).value.length>0;$(row).classList.toggle('hide',!has);if(!has){$(cb).checked=false;$(f).classList.add('masked');}}
 function jt(u,ms){var ac=window.AbortController?new AbortController():null;var t=ac?setTimeout(function(){ac.abort()},ms):null;return fetch(u,ac?{signal:ac.signal,cache:'no-store'}:{cache:'no-store'}).then(function(r){if(t)clearTimeout(t);return r.json()})}
 function setText(id,t){var e=$(id);if(e&&e.textContent!==t)e.textContent=t}
 function setClass(e,c){if(e&&e.className!==c)e.className=c}
@@ -194,10 +221,13 @@ function age(ms){var a=ms/1000;return a<1?'now':a<60?Math.round(a)+'s ago':Math.
 function applyTally(d){if(!d||!d.tally)return;var s=d.tally,c='tally-'+s.toLowerCase();setText('tallyState',s);setClass($('tallyState'),c);if(document.body.className!==c)document.body.className=c;if('text' in d)setText('tallyText',d.text||'-');}
 function applyStatus(s){if(!s)return;applyTally(s);var c=s.connection||'',cls=c.indexOf('Ethernet')>=0?'conn-eth':c.indexOf('WiFi')>=0?'conn-wifi':c.indexOf('AP')>=0?'conn-ap':'';
 setText('conn',c);setClass($('conn'),cls);setText('ip',s.ip||'');setText('hdrIp',s.ip?'\u00b7 '+s.ip:'');setText('hdrConn',c?'\u00b7 '+c:'');setClass($('hdrConn'),cls);
-setText('tsl',s.pkts?s.pkts+' pkts from '+s.from+' \u00b7 '+age(s.age):'No data for this address yet');$('tsl').style.color=s.pkts?'':'var(--muted)';}
+setText('tsl',s.pkts?s.pkts+' pkts from '+s.from+' \u00b7 '+age(s.age):'No data for this address yet');$('tsl').style.color=s.pkts?'':'var(--muted)';
+lock.pinSet=!!s.pinSet;lock.phys=!!s.phys;$('pinclearRow').classList.toggle('hide',!s.pinSet);if(!$('newpin').value)$('newpin').placeholder=s.pinSet?'blank = keep current PIN':'4 to 16 characters, blank = no lock';
+setText('lockst',!s.pinSet?'Off':(s.phys?'Unlocked at the device, '+Math.max(1,Math.ceil(s.physLeft/60))+' min left':'PIN required'));$('lockst').style.color=s.pinSet&&s.phys?'#e0a800':'';
+setText('clk',s.time>1750000000?new Date(s.time*1000).toISOString().replace('T',' ').slice(0,19):'not synced');$('clk').style.color=s.time>1750000000?'':'var(--muted)';}
 function poll(){j('/status').then(applyStatus).catch(function(){})}
-function testOn(s){testHeld=1;j('/test?state='+s).then(applyTally).catch(function(){})}
-function testOff(){if(!testHeld)return;testHeld=0;j('/test?restore=1').then(applyTally).catch(function(){})}
+function testOn(s){if(needPin()){askPin(function(){});return;}testHeld=1;jp('/test?state='+s).then(applyTally).catch(function(){})}
+function testOff(){if(!testHeld)return;testHeld=0;jp('/test?restore=1').then(applyTally).catch(function(){})}
 function discoverDevices(){$('deviceList').innerHTML='<p class="no-devices">Scanning...</p>';
 j('/discover').then(function(d){devices=d.devices||[];var h='';
 if(!devices.length){h='<p class="no-devices">No other devices found</p>';}
@@ -205,20 +235,24 @@ else{devices.forEach(function(dev){var id=dev.ip.replace(/\./g,'-');
 h+='<div class="device-item"><div class="device-status off" id="status-'+id+'"></div><div class="device-info"><div class="device-name">'+esc(dev.hostname)+'</div><div class="device-details">TSL:'+dev.tslAddress+' | '+esc(dev.ip)+'</div></div><a href="http://'+esc(dev.ip)+'/" target="_blank" class="device-link">Open</a></div>';});}
 $('deviceList').innerHTML=h;updateDeviceStatuses();}).catch(function(){$('deviceList').innerHTML='<p class="no-devices">Scan failed</p>';});}
 function updateDeviceStatuses(){devices.forEach(function(dev){j('http://'+dev.ip+'/status').then(function(d){setClass($('status-'+dev.ip.replace(/\./g,'-')),'device-status '+String(d.tally).toLowerCase());}).catch(function(){});});}
-function bulkTest(state){devices.forEach(function(dev){fetch('http://'+dev.ip+'/test?state='+state).catch(function(){});});j('/test?state='+state).then(applyTally).catch(function(){});}
+function bulkTest(state){guarded(function(){devices.forEach(function(dev){fetch(withPinAny('http://'+dev.ip+'/test?state='+state)).catch(function(){});});jp('/test?state='+state).then(applyTally).catch(function(){});});}
 function loadConfig(){j('/api/config').then(function(c){apMode=!!c.apMode;roMode=apMode;if(apMode)showTab('sys');
 setText('hostTitle',c.hostname);setText('host',c.hostname);setText('mac',c.mac);setText('fw',c.fw);setText('build','build '+c.build);
 $('apRow').classList.toggle('hide',!apMode);setText('apSsid',c.apSsid);
 $('apNote').textContent='If Ethernet and WiFi both fail, the device starts an access point: '+c.apSsid+' (password: '+c.apPass+')';
 $('tslAddr').value=c.tslAddr;$('tslMcast').value=c.mcast;$('tslPort').value=c.port;$('maxBright').value=c.maxBright;$('ledAnim').value=c.ledAnim;
 $('hostname').value=c.hostname;$('dhcp').value=c.dhcp?'1':'0';$('sip').value=c.ip;$('gw').value=c.gw;$('sn').value=c.sn;$('dns').value=c.dns;
-$('wifiEn').value=c.wifiEn?'1':'0';$('wifiSSID').value=c.ssid;$('wifiPass').value=c.pass;
+$('wifiEn').value=c.wifiEn?'1':'0';$('wifiSSID').value=c.ssid;$('wifiPass').value='';$('wifiPass').placeholder=c.passSet?'(unchanged)':'';lock.pinSet=!!c.pinSet;
 if(apMode){document.querySelectorAll('#cfgForm input').forEach(function(e){if(e.type!=='checkbox')e.readOnly=true;});}
 toggleIP();toggleWifi();whatsNew(c);}).catch(function(){});}
 function applyTheme(t){if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.removeAttribute('data-theme');document.querySelectorAll('.th').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-th')===t)});}
 function setTheme(t){try{localStorage.setItem('theme',t)}catch(e){}applyTheme(t);}
 function showTab(t){document.querySelectorAll('.tab').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-tab')===t)});document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('on',p.id==='tab-'+t)});try{localStorage.setItem('tab',t)}catch(e){}}
-function validateTabs(){var f=$('cfgForm');if(f.checkValidity())return true;var bad=f.querySelector(':invalid');if(bad){var p=bad.closest('.panel');if(p)showTab(p.id.slice(4));bad.reportValidity();}return false;}
+function validateTabs(){var f=$('cfgForm');if(!f.checkValidity()){var bad=f.querySelector(':invalid');if(bad){var p=bad.closest('.panel');if(p)showTab(p.id.slice(4));bad.reportValidity();}return false;}
+var np=$('newpin').value,clr=$('pinclear').checked;function remember(){if(clr)setPin('');else if(np)setPin(np);}
+var lockChange=(np||clr)&&lock.pinSet&&!lock.phys;
+if(needPin()||lockChange){askPin(function(){$('pinField').value=getPin();remember();f.submit();},lockChange?'Enter the current PIN to '+(clr?'remove the lock.':'change the PIN.'):null);return false;}
+$('pinField').value=getPin();remember();return true;}
 function toggleIP(){$('ipFields').classList.toggle('hide',$('dhcp').value!=='0')}
 function toggleWifi(){$('wifiFields').classList.toggle('hide',$('wifiEn').value!=='1')}
 var wifiTimer=null;
@@ -234,32 +268,32 @@ h+='<div class="wifi-item" onclick="pickWifi(this)" data-ssid="'+esc(w.ssid)+'">
 l.innerHTML=h||'<p class="note">No networks found</p>';
 }).catch(function(){b.disabled=false;b.textContent='Scan for Networks';l.innerHTML='<p class="note">Scan failed</p>';});}
 function pickWifi(el){$('wifiSSID').value=el.getAttribute('data-ssid');$('wifiList').classList.remove('show');}
-function resetDefaults(){if(confirm('Reset all settings to factory defaults?\n\nThis will erase all configuration and reboot the device.')){window.location.href='/reset';}}
-function showModal(title,date,notes,text,btns){setText('mTitle',title);setText('mDate',date||'');var u=$('mNotes');u.innerHTML='';(notes||[]).forEach(function(n){var li=document.createElement('li');li.textContent=n;u.appendChild(li);});
+function resetDefaults(){if(confirm('Reset all settings to factory defaults?\n\nThis will erase all configuration and reboot the device.')){guarded(function(){window.location.href=withPin('/reset');});}}
+function showModal(title,date,notes,text,btns){$('mPin').classList.add('hide');setText('mTitle',title);setText('mDate',date||'');var u=$('mNotes');u.innerHTML='';(notes||[]).forEach(function(n){var li=document.createElement('li');li.textContent=n;u.appendChild(li);});
 var t=$('mText');t.classList.toggle('hide',!text);t.textContent=text||'';var b=$('mBtns');b.innerHTML='';(btns||[]).forEach(function(x){var e=document.createElement('button');e.type='button';e.textContent=x[0];if(x[2])e.setAttribute('style',x[2]);e.onclick=x[1];b.appendChild(e);});
 b.classList.toggle('hide',!(btns&&btns.length));$('ovl').classList.add('show');}
 function closeModal(){$('ovl').classList.remove('show');}
 function offerUpdate(d){upd=d;$('updateNotice').classList.remove('hide');setText('latest',d.latest);
-showModal('Update available: v'+String(d.latest).replace(/^v/,''),(d.date?'Released '+d.date+' \u00b7 ':'')+'you have v'+d.current,d.notes,null,[['Install',function(){closeModal();installUpdate(true);},'background:#4CAF50;color:#fff'],['Later',closeModal,'background:var(--field);color:var(--text)']]);}
+showModal('Update available: v'+String(d.latest).replace(/^v/,''),(d.date?'Released '+d.date+' \u00b7 ':'')+'you have v'+d.current,d.notes,null,[['Install',function(){closeModal();guarded(function(){installUpdate(true);});},'background:#4CAF50;color:#fff'],['Later',closeModal,'background:var(--field);color:var(--text)']]);}
 function checkUpdate(){$('updateNotice').classList.add('hide');j('/api/check-update').then(function(d){setText('fw',d.current);
-if(d.updateAvailable)offerUpdate(d);else showModal('Firmware is up to date','Version '+d.current,null,d.latest?'This is the latest release.':'The release manifest could not be reached.',[['Close',closeModal]]);
+if(d.updateAvailable)offerUpdate(d);else if(d.error)showModal('Update check failed','Version '+d.current,null,d.error,[['Close',closeModal]]);else showModal('Firmware is up to date','Version '+d.current,null,'This is the latest release.',[['Close',closeModal]]);
 }).catch(function(){showModal('Update check failed','',null,'The device could not fetch the release manifest.',[['Close',closeModal]]);});}
 function installUpdate(fromModal){if(!fromModal&&!confirm('Install firmware update?\n\nThe device will download the new firmware and reboot.'))return;
 var v=upd?upd.latest:'';showModal('Updating firmware'+(v?' to v'+String(v).replace(/^v/,''):''),'',null,'Downloading and flashing. The device reboots when done and this page reloads.',[]);
-$('updateNotice').innerHTML='<span style="color:#ff6b6b">Updating... device will reboot</span>';fetch('/api/update').catch(function(){});
+$('updateNotice').innerHTML='<span style="color:#ff6b6b">Updating... device will reboot</span>';fetch(withPin('/api/update')).catch(function(){});
 var t0=Date.now();setTimeout(function w(){if(Date.now()-t0>120000){showModal('Update taking longer than expected','',null,'The device has not come back with a new version yet. Reload to check.',[['Reload',function(){location.reload()}]]);return;}
-jt('/api/config',2500).then(function(c){if(c.fw&&c.fw!==curFw){location.reload();}else setTimeout(w,2000);}).catch(function(){setTimeout(w,2000);});},5000);}
+jt('/api/update-status',2500).then(function(c){if(c.fw&&c.fw!==curFw){location.reload();}else if(!c.inProgress&&c.error){showModal('Update failed','',null,c.error,[['Close',closeModal]]);$('updateNotice').innerHTML='<span style="color:#ff6b6b">Update failed</span>';}else setTimeout(w,2000);}).catch(function(){setTimeout(w,2000);});},5000);}
 function whatsNew(c){curFw=c.fw;var seen=null;try{seen=localStorage.getItem('seenFw')}catch(e){}if(seen===c.fw||apMode)return;
 j('/api/check-update').then(function(d){try{localStorage.setItem('seenFw',c.fw)}catch(e){}
 if(d.updateAvailable)offerUpdate(d);else if(d.notes&&d.notes.length&&String(d.latest).replace(/^v/,'')===d.current)showModal("What's new in v"+d.current,d.date?'Released '+d.date:'',d.notes,null,[['Close',closeModal]]);}).catch(function(){});}
 var discoBuffer='',discoTimer=null;
 document.addEventListener('keydown',function(e){if(isField(e.target))return;discoBuffer=(discoBuffer+String(e.key).toLowerCase()).slice(-5);if(discoBuffer==='disco')startDisco();});
-function startDisco(){$('discoOverlay').classList.add('active');fetch('/disco?duration=30').catch(function(){});
-var go=function(){devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=30').catch(function(){});});};
+function startDisco(){guarded(function(){$('discoOverlay').classList.add('active');fetch(withPin('/disco?duration=30')).catch(function(){});
+var go=function(){devices.forEach(function(dev){fetch(withPinAny('http://'+dev.ip+'/disco?duration=30')).catch(function(){});});};
 if(devices.length)go();else j('/discover').then(function(d){devices=d.devices||[];go();}).catch(function(){});
-clearTimeout(discoTimer);discoTimer=setTimeout(function(){$('discoOverlay').classList.remove('active');},30000);}
-function stopDisco(){clearTimeout(discoTimer);$('discoOverlay').classList.remove('active');fetch('/disco-stop').catch(function(){});
-devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco-stop').catch(function(){});});}
+clearTimeout(discoTimer);discoTimer=setTimeout(function(){$('discoOverlay').classList.remove('active');},30000);});}
+function stopDisco(){clearTimeout(discoTimer);$('discoOverlay').classList.remove('active');fetch(withPin('/disco-stop')).catch(function(){});
+devices.forEach(function(dev){fetch(withPinAny('http://'+dev.ip+'/disco-stop')).catch(function(){});});}
 var lastUser=0,lastTarget=null;
 function isField(t){return !!t&&/^(INPUT|TEXTAREA)$/.test(t.tagName)&&t.type!=='checkbox';}
 function isCtl(t){return !!t&&/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(t.tagName);}

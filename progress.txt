@@ -50,13 +50,16 @@ Current Version: 1.1.0
 ### OTA Updates
 - [x] ArduinoOTA support (port 3232, password: password)
 - [x] Release manifest on S3 (version, URL, MD5, date, notes); GitHub releases kept as the bridge for <=1.0.12
+- [x] Pinned TLS to S3 (Amazon root CAs), SNTP clock, signed firmware (ECDSA P-256) verified before boot
+- [x] Settings PIN (Save, Reset, Install, test, disco); /api/unlock; WiFi password never returned
+- [x] BOOT button at runtime: 3 s unlock for 10 min, 10 s factory reset with red countdown
 - [x] Version comparison logic
 - [x] One-click firmware download and install
 - [x] Update progress LED indication (purple)
 
 ### Persistence & Reset
 - [x] NVS settings storage
-- [x] Factory reset via BOOT button (3 second hold)
+- [x] Factory reset via BOOT button (10 second hold at runtime)
 - [x] Factory reset via web interface
 - [x] Settings restore after reboot
 

@@ -58,15 +58,15 @@ Open the device IP or `http://<hostname>.local`. Three tabs:
 
 - **Operation** (default): tally state, TSL text, TSL data counter, test buttons, network device list.
 - **Configuration**: TSL Settings and LED Settings.
-- **System**: device identity and firmware update, Network and WiFi settings, factory reset.
+- **System**: device identity, clock and firmware update, Network and WiFi settings, settings lock, factory reset.
 
 The header shows hostname, IP and connection on every tab, and the page background follows the tally colour. An Auto / Light / Dark switch above the tabs sets the page theme (Auto follows the browser or OS setting); the choice is stored in the browser and also applies to native form controls. The last tab used is remembered in the browser; in AP mode the page opens on System. Configuration and System share one form, so Save on either tab saves both.
 
-**Save** applies most settings immediately: TSL address, max brightness and LED animation take effect without a reboot, and a toast confirms it. The device reboots only when a boot-time setting changed: hostname, IP configuration, WiFi, or the TSL multicast address and port. Hostnames are reduced to letters, digits and hyphens; IP fields that do not parse are ignored.
+**Save** applies most settings immediately: TSL address, max brightness and LED animation take effect without a reboot, and a toast confirms it. The device reboots only when a boot-time setting changed: hostname, IP configuration, WiFi, or the TSL multicast address and port. Hostnames are reduced to letters, digits and hyphens; IP fields that do not parse are ignored. With a settings PIN set, Save asks for it once per browser session (see [Settings Lock](#settings-lock)).
 
 ### Status
 
-Operation tab: tally state (Off/Green/Red/Yellow), the TSL text label, and **TSL data**: packets received for this device's address, the sender and how long ago the last one arrived. Polled every second. System tab: connection type, IP, hostname, MAC, firmware version with **Check** / **Install** update buttons. The footer shows the firmware build date and time.
+Operation tab: tally state (Off/Green/Red/Yellow), the TSL text label, and **TSL data**: packets received for this device's address, the sender and how long ago the last one arrived. Polled every second. System tab: connection type, IP, hostname, MAC, clock (UTC, from SNTP), settings lock state, firmware version with **Check** / **Install** update buttons. The footer shows the firmware build date and time.
 
 ### Test Buttons
 
@@ -127,9 +127,17 @@ Hostname, DHCP or static IP (address, gateway, subnet, DNS). Applies to Ethernet
 | WiFi | Disabled, or Enabled (used when Ethernet is down) |
 | SSID | WiFi network name |
 | Scan for Networks | Lists nearby networks, strongest first, one row per SSID with a lock for secured networks. Tap a row to fill in the SSID. Works in Ethernet, WiFi and AP mode |
-| Password | WiFi password, masked with a **Show password** toggle |
+| Password | WiFi password. Never shown once stored: leave blank to keep it, type to replace it (a **Show while typing** toggle appears), or tick **Network has no password** to clear it |
 
 Changes here reboot the device.
+
+### Settings Lock
+
+An optional PIN (4 to 16 characters) gates every change made over the network: Save, Reset Defaults, firmware Install, the test buttons, bulk buttons and disco. Status and configuration reads stay open so a monitor wall can watch. The page asks for the PIN once per browser session and sends it with each change; wrong or missing gives HTTP 401. Changing or removing the PIN asks for the current one again, unless the unit was unlocked from its BOOT button. Bulk buttons and disco send this device's PIN to the other tallies they drive, so use the same PIN across a fleet.
+
+**Forgotten PIN:** hold BOOT on the unit for 3 seconds (the ring blinks red) and release: the settings are unlocked for 10 minutes without the PIN, shown on the System tab. Anyone at the box can reflash it over USB anyway, so this costs nothing. Keep holding for 10 seconds to factory reset instead.
+
+The PIN travels over plain HTTP. It protects against accidents and the curious on the LAN, not a determined attacker; put the device on a trusted or segmented network, as with any broadcast control gear.
 
 ## Network Modes
 
@@ -159,8 +167,9 @@ When no network is available, the device creates its own access point:
 | Purple spin | Connecting to WiFi |
 | Cyan spin | AP mode starting |
 | Dim cyan | AP mode active |
-| Red blink | Factory reset in progress |
-| Blue flash | Factory reset complete |
+| Red blink (BOOT held 3 s) | Release now to unlock the settings for 10 minutes; keep holding for factory reset |
+| Red blink, faster (BOOT held 7 s) | Factory reset in 3 seconds, release to abort |
+| Blue, then reboot | Factory reset done (BOOT held 10 s) |
 | Red, green, blue cycle | Network connected, ready |
 | Purple (solid) | Firmware update in progress |
 | Green (solid) then reboot | Firmware update succeeded |
@@ -210,16 +219,18 @@ The text label is filtered to printable ASCII and trimmed.
 | `/info` | GET | JSON device info (hostname, MAC, TSL address, firmware, build) |
 | `/test?state=N` | GET | Set tally state (0-3) at max brightness |
 | `/test?restore=1` | GET | Return to the last state received over TSL |
+| `/api/unlock?pin=N` | GET | `{"ok":true}` if the PIN is right, no PIN is set, or the unit is physically unlocked |
 | `/discover` | GET | Scan network (cached 10 s) and return found tally devices |
 | `/api/wifi-scan` | GET | Start an async WiFi scan (`?start=1`) or return its result; `{"scanning":true}` while running |
 | `/disco?duration=N` | GET | Start disco mode for N seconds (1-120, default 30) |
 | `/disco-stop` | GET | Stop disco mode and restore the tally state |
-| `/api/check-update` | GET | Fetch the release manifest; returns current, latest, date and notes |
-| `/api/update` | GET | Download and install the firmware named in the manifest |
+| `/api/check-update` | GET | Fetch the release manifest; returns current, latest, date, notes, `error` and `clock` |
+| `/api/update` | GET | Download, verify signature, install |
+| `/api/update-status` | GET | `fw`, `inProgress`, `error` for the install in progress |
 | `/save` | POST | Save settings; applies live, or reboots if network, hostname or TSL socket settings changed |
 | `/reset` | GET | Factory reset and reboot |
 
-`/status`, `/test`, `/info`, `/disco` and `/disco-stop` send `Access-Control-Allow-Origin: *` so one tally's page can drive the others.
+`/status`, `/test`, `/info`, `/api/unlock`, `/api/update-status`, `/disco` and `/disco-stop` send `Access-Control-Allow-Origin: *` so one tally's page can drive the others. With a settings PIN set, `/save`, `/reset`, `/test`, `/disco`, `/disco-stop` and `/api/update` need `pin=<PIN>` (query or form field) and answer 401 without it. `/api/config` reports `passSet` and `pinSet` instead of the values.
 
 In AP mode, the captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, `/connecttest.txt`, `/hotspot-detect.html`, `/library/test/success.html`) and any unknown path redirect to `/`.
 
@@ -233,11 +244,15 @@ In AP mode, the captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, `/conne
   "connection": "Ethernet",
   "pkts": 1234,
   "age": 480,
-  "from": "192.168.1.10"
+  "from": "192.168.1.10",
+  "time": 1788950000,
+  "pinSet": false,
+  "phys": false,
+  "physLeft": 0
 }
 ```
 
-`pkts` counts packets addressed to this device since boot, `age` is milliseconds since the last one, `from` is its sender.
+`pkts` counts packets addressed to this device since boot, `age` is milliseconds since the last one, `from` is its sender. `time` is the SNTP clock (Unix seconds, 0 until synced). `pinSet` says a settings PIN exists, `phys` that the unit was unlocked from its BOOT button, with `physLeft` seconds remaining.
 
 ### Info Response
 
@@ -273,14 +288,23 @@ In AP mode, the captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, `/conne
 
 Click **Check** on the System tab. If a newer version exists a popup lists the release notes with **Install** and **Later**; Install shows progress and reloads the page when the device is back. After an update, the page shows a "What's new" popup once per browser.
 
-The device fetches `https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-update.json` (URL in [src/main.cpp](src/main.cpp)), compares `version` with its own, shows the release notes, and on Install downloads the binary at `url`. The `md5` in the manifest is checked before the new image is accepted.
+The device fetches `https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-update.json` (URL in [src/main.cpp](src/main.cpp)), compares `version` with its own, shows the release notes, and on Install downloads the binary at `url`.
 
 Manifest format:
 
 ```json
-{"version":"1.1.0","url":"https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-1.1.0.bin",
- "md5":"...","size":1304000,"release_date":"2026-09-07","notes":["Tabbed web page","..."]}
+{"version":"1.2.0","url":"https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-1.2.0.bin",
+ "md5":"...","sha256":"...","sig":"<base64 ECDSA-SHA256 signature>","size":1325000,
+ "release_date":"2026-09-07","notes":["...","..."]}
 ```
+
+### Update security
+
+- **Transport.** Manifest and binary are fetched over TLS validated against Amazon's root certificates compiled into the firmware ([src/certs.h](src/certs.h)). A device that cannot validate the chain refuses to talk. Validation needs the clock, so the device syncs SNTP when online and the update check waits until it has; the System tab shows the clock.
+- **Authenticity.** Every release is signed with an ECDSA P-256 key that never enters the repo. `release.sh` reads it from the macOS Keychain (generic password `videowalrus-tsl-tally-signing`, PEM base64-encoded) and falls back to a PEM file at `~/.config/videowalrus/tsl-tally-signing.key` or `SIGNING_KEY=<file>`. The public key is compiled in ([src/signing_key.h](src/signing_key.h)). The device hashes the binary as it streams into the passive partition and verifies the signature before the image is marked bootable; a mismatch aborts and the running firmware stays. This holds even if the bucket or the AWS credentials are compromised.
+- **Manifests without a signature are refused** by firmware 1.2.0 and later. `release.sh` checks that the compiled-in public key matches the private key before building, so a release can never be signed with a key the devices don't trust.
+- **Key loss.** Losing the private key means no further OTA updates to devices in the field; they would need USB reflashing with a new public key. The login Keychain lives on one Mac, so keep a second copy somewhere encrypted and off the machine. The tally key is separate from the TSL relay's.
+- **Older firmware.** 1.1.0 verifies MD5 only and ignores the signature fields, so it can still update to a signed release. 1.0.12 and earlier update from GitHub, where the v1.1.0 release remains as the stepping stone.
 
 **Firmware 1.0.12 and earlier** looks for updates on GitHub releases instead (`https://api.github.com/repos/videojedi/esp32-s3-tally/releases/latest`, asset `firmware.bin`). The v1.1.0 GitHub release exists so those devices can reach the manifest-based firmware; after that they update from S3 like everything else.
 
@@ -324,24 +348,20 @@ The script will:
 ./release.sh 1.1.0 "Tabbed web page" "Light and dark themes"
 ```
 
-Bumps `FIRMWARE_VERSION`, builds, commits, tags, pushes, uploads `tsl-tally-<version>.bin` to S3 and rewrites the manifest with version, URL, MD5, size, date and the notes given as arguments. Safe to rerun for the same version. Needs the AWS CLI and a `.env` in the project root with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `S3_BUCKET` (not committed).
+Bumps `FIRMWARE_VERSION`, builds, signs the binary, commits, tags, pushes, uploads `tsl-tally-<version>.bin` to S3 and rewrites the manifest with version, URL, MD5, SHA-256, signature, size, date and the notes given as arguments. Safe to rerun for the same version. Needs the AWS CLI and a `.env` in the project root with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `S3_BUCKET` (not committed).
 
 `GITHUB=1 ./release.sh ...` also creates a GitHub release with `firmware.bin` attached, for devices still on 1.0.12 or earlier.
 
 ## Factory Reset
 
 ### Hardware Reset
-1. Power on the device
-2. Within 3 seconds, press and hold the BOOT button (GPIO 0). Do not hold it before power-on: GPIO 0 low at reset puts the ESP32-S3 into download mode instead
-3. LEDs blink red while the button is held
-4. After 3 seconds the LEDs turn blue and settings are reset; release the button
-5. Device continues booting with factory defaults
+
+With the unit running, hold BOOT (GPIO 0). After 3 seconds the ring blinks red; keep holding and the blink speeds up at 7 seconds. At 10 seconds the ring turns blue, settings are erased and the unit reboots into AP mode. Release before 10 seconds and nothing is erased (releasing after 3 seconds unlocks the settings instead, see [Settings Lock](#settings-lock)). Do not hold BOOT while powering on or pressing RESET: GPIO 0 low at reset enters the USB bootloader instead of the firmware.
 
 ### Web Interface Reset
-1. Open the device configuration page
-2. Click "Reset Defaults" button
-3. Confirm the reset
-4. Device reboots with factory settings
+1. Open the device configuration page, System tab
+2. Click "Reset Defaults" and confirm (asks for the PIN if one is set)
+3. Device reboots with factory settings
 
 ## Building
 
@@ -410,7 +430,8 @@ This separation ensures reliable multicast reception even when the web interface
 - ESPmDNS - mDNS responder and service discovery (`_tally._tcp` with TXT records)
 - NetworkUdp - UDP multicast
 - ArduinoOTA - Over-the-air updates
-- HTTPClient / WiFiClientSecure / Update - firmware updates from the release manifest
+- HTTPClient / WiFiClientSecure / Update - firmware updates from the release manifest over pinned TLS
+- mbedtls (sha256, pk, base64) - firmware signature verification
 - DNSServer - Captive portal support
 
 ## License

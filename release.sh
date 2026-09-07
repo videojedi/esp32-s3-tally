@@ -16,6 +16,7 @@
 # - PlatformIO (pio) on PATH
 # - AWS CLI, and a .env in this directory with:
 #     AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...  AWS_REGION=us-east-1  S3_BUCKET=videowalrus-releases
+# - The firmware signing key (see below)
 # - Git repository with remote 'origin'
 # - GitHub CLI (gh) authenticated, only when GITHUB=1
 
@@ -50,6 +51,32 @@ BASE_URL="https://$S3_BUCKET.s3.$AWS_REGION.amazonaws.com"
 
 command -v aws >/dev/null || { echo "Error: aws CLI not installed"; exit 1; }
 aws sts get-caller-identity >/dev/null 2>&1 || { echo "Error: AWS credentials not available (create .env)"; exit 1; }
+
+# Firmware signing. The private key never enters the repo; the public key is compiled in
+# (src/signing_key.h). Preferred home is the macOS Keychain, as a generic password holding
+# the PEM base64-encoded:
+#   security add-generic-password -a "$USER" -s videowalrus-tsl-tally-signing \
+#     -l "TSL Tally firmware signing key" -w "$(base64 < key.pem | tr -d '\n')"
+# Fallback is a PEM file at $SIGNING_KEY. The key only exists decrypted in this shell's memory.
+KEYCHAIN_ITEM="videowalrus-tsl-tally-signing"
+: "${SIGNING_KEY:=$HOME/.config/videowalrus/tsl-tally-signing.key}"
+SIGNING_PEM=""
+if B64=$(security find-generic-password -s "$KEYCHAIN_ITEM" -w 2>/dev/null); then
+    SIGNING_PEM=$(printf '%s' "$B64" | base64 -d 2>/dev/null || true)
+    KEY_SOURCE="Keychain item $KEYCHAIN_ITEM"
+elif [ -f "$SIGNING_KEY" ]; then
+    SIGNING_PEM=$(cat "$SIGNING_KEY")
+    KEY_SOURCE="$SIGNING_KEY"
+else
+    echo "Error: no signing key. Add it to the Keychain (see comment above) or set SIGNING_KEY=<pem file>."
+    exit 1
+fi
+case "$SIGNING_PEM" in *"BEGIN EC PRIVATE KEY"*|*"BEGIN PRIVATE KEY"*) ;; *) echo "Error: signing key from $KEY_SOURCE is not a PEM private key"; exit 1;; esac
+if ! diff -q <(printf '%s\n' "$SIGNING_PEM" | openssl ec -pubout 2>/dev/null) <(sed -n '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/p' src/signing_key.h) >/dev/null; then
+    echo "Error: src/signing_key.h does not match the key from $KEY_SOURCE. Devices would reject this release."
+    exit 1
+fi
+echo "Signing key: $KEY_SOURCE"
 if [ -n "$GITHUB" ]; then
     command -v gh >/dev/null || { echo "Error: GitHub CLI (gh) not installed"; exit 1; }
     gh auth status >/dev/null 2>&1 || { echo "Error: not authenticated with gh"; exit 1; }
@@ -71,7 +98,10 @@ $PIO run -e esp32-s3
 [ -f "$FIRMWARE_PATH" ] || { echo "Error: firmware binary not found at $FIRMWARE_PATH"; exit 1; }
 SIZE=$(stat -f %z "$FIRMWARE_PATH")
 MD5=$(md5 -q "$FIRMWARE_PATH")
+SHA256=$(shasum -a 256 "$FIRMWARE_PATH" | cut -d' ' -f1)
+SIG=$(openssl dgst -sha256 -sign <(printf '%s\n' "$SIGNING_PEM") "$FIRMWARE_PATH" | base64 | tr -d '\n')
 echo "Firmware built: $FIRMWARE_PATH ($SIZE bytes, md5 $MD5)"
+echo "Signed: sha256 $SHA256, signature ${#SIG} chars"
 
 echo ""
 echo "Committing, tagging, pushing..."
@@ -108,6 +138,8 @@ cat > "dist/$MANIFEST_KEY" <<JSON
   "version": "$VERSION",
   "url": "$BASE_URL/$BIN_KEY",
   "md5": "$MD5",
+  "sha256": "$SHA256",
+  "sig": "$SIG",
   "size": $SIZE,
   "release_date": "$(date +%Y-%m-%d)",
   "notes": $NOTES_JSON

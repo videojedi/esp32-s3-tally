@@ -169,7 +169,9 @@ The device shall support over-the-air firmware updates via two methods.
 
 **Method 2: Release Manifest (Production)**
 - Version check against the Video Walrus S3 manifest (`tsl-tally-update.json`); release notes and date shown in the web UI
-- MD5 from the manifest verified before the image is accepted
+- TLS to S3 validated against Amazon root CAs compiled in; SNTP clock required for certificate dates
+- Every release signed with ECDSA P-256; the device hashes the download and verifies the signature before the image is marked bootable, and refuses unsigned manifests
+- MD5 from the manifest also verified
 - One-click download and install from web UI
 - Progress indication via LED (purple during update)
 - Automatic reboot after successful update
@@ -181,7 +183,7 @@ The device shall support over-the-air firmware updates via two methods.
 All configuration shall persist across power cycles using ESP32 NVS (Non-Volatile Storage).
 
 **Stored Settings:**
-- TSL address, multicast IP, port, max brightness, LED animation (Solid/Spin)
+- TSL address, multicast IP, port, max brightness, LED animation (Solid/Spin), settings PIN
 - Settings apply live unless network, hostname or TSL socket settings changed (then reboot)
 - Network mode (DHCP/Static), static IP configuration
 - WiFi enabled flag, SSID, password
@@ -194,14 +196,14 @@ All configuration shall persist across power cycles using ESP32 NVS (Non-Volatil
 The device shall support two methods of factory reset.
 
 **Hardware Reset:**
-1. Hold BOOT button during power-on
-2. Wait for red blinking (~3 seconds)
-3. Release when LED turns blue
-4. All settings cleared, device reboots
+1. With the unit running, hold BOOT
+2. Ring blinks red from 3 s, faster from 7 s
+3. At 10 s the ring turns blue, settings are erased, device reboots
+4. Release before 10 s to abort (release after 3 s unlocks the settings for 10 minutes)
 
 **Web Interface Reset:**
 1. Click "Reset Defaults" button
-2. Confirm in dialog
+2. Confirm in dialog (PIN if set)
 3. All settings cleared, device reboots
 
 ### FR-9: LED Status Indicators
@@ -329,7 +331,8 @@ This separation ensures reliable multicast reception even during web interface a
 | OTA password | Default "password" - should be changed for production |
 | No HTTPS | Local network only, not exposed to internet |
 | No authentication | Web UI open access - assumes trusted network |
-| Manifest OTA | Uses HTTPS, skips cert verification; MD5 checked (acceptable for embedded) |
+| Manifest OTA | Pinned TLS (Amazon roots), signed firmware (ECDSA P-256), MD5 |
+| Settings lock | Optional PIN over plain HTTP; BOOT button unlock for 10 min; against accidents and LAN curiosity, not a determined attacker |
 
 ## Future Enhancements (Backlog)
 
