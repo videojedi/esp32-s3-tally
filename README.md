@@ -15,7 +15,7 @@ A TSL 3.1 protocol tally light with web-based configuration, built for ESP32-S3 
 - **Captive Portal** - Automatic configuration page popup in AP mode
 - **Unique Device Identity** - Each device gets a unique hostname based on MAC address
 - **mDNS Support** - Access via hostname.local (e.g., `http://Tally-AABBCC.local`)
-- **OTA Updates** - Over-the-air firmware updates via PlatformIO or GitHub releases
+- **OTA Updates** - Over-the-air firmware updates from the Video Walrus release manifest, or via PlatformIO
 - **Persistent Settings** - Configuration stored in NVS flash
 - **Factory Reset** - Hold BOOT button for 3 seconds, or use web interface button
 
@@ -54,18 +54,19 @@ The W5500 module connects via SPI. These defines must be set before including ET
 
 ## Web Interface
 
-Access the configuration page at the device IP or via mDNS (`http://hostname.local`).
+Open the device IP or `http://<hostname>.local`. Three tabs:
 
-### Status Display
+- **Operation** (default): tally state, TSL text, TSL data counter, test buttons, network device list.
+- **Configuration**: TSL Settings and LED Settings.
+- **System**: device identity and firmware update, Network and WiFi settings, factory reset.
 
-- Current connection type (Ethernet/WiFi/AP)
-- IP Address
-- Tally State (Off/Green/Red/Yellow), refreshed every 2 seconds
-- TSL Text label
-- MAC addresses
-- Firmware version with **Check** / **Install** update buttons
+The header shows hostname, IP and connection on every tab, and the page background follows the tally colour. An Auto / Light / Dark switch above the tabs sets the page theme (Auto follows the browser or OS setting); the choice is stored in the browser and also applies to native form controls. The last tab used is remembered in the browser; in AP mode the page opens on System. Configuration and System share one form, so Save on either tab saves both.
 
-The page background follows the tally colour. The footer shows the firmware build date and time.
+**Save** applies most settings immediately: TSL address, max brightness and LED animation take effect without a reboot, and a toast confirms it. The device reboots only when a boot-time setting changed: hostname, IP configuration, WiFi, or the TSL multicast address and port. Hostnames are reduced to letters, digits and hyphens; IP fields that do not parse are ignored.
+
+### Status
+
+Operation tab: tally state (Off/Green/Red/Yellow), the TSL text label, and **TSL data**: packets received for this device's address, the sender and how long ago the last one arrived. Polled every second. System tab: connection type, IP, hostname, MAC, firmware version with **Check** / **Install** update buttons. The footer shows the firmware build date and time.
 
 ### Test Buttons
 
@@ -74,7 +75,7 @@ Manual tally control buttons for testing (momentary - hold to activate):
 - **RED** - Program/on-air (state 2)
 - **YELLOW** - Both tallies active (state 3)
 
-Releasing a button returns the light to the last state and brightness received from the switcher (Off if nothing has been received since boot).
+Releasing a button, or dragging off it, returns the light to the last state and brightness received from the switcher (Off if nothing has been received since boot).
 
 ### Network Devices
 
@@ -87,17 +88,22 @@ Automatically discovers and displays other tally lights on your network:
 
 ### Disco Mode
 
-Type `disco` anywhere on the configuration page to run a 30-second rainbow party on this device and every discovered device. Tap **Stop** on the overlay to end it early.
+Type `disco` anywhere on the page (outside a text field) to run a 30-second rainbow party on this device and every discovered device. Tap **Stop** on the overlay to end it early.
 
 ### TSL Settings
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| TSL Address | Tally address 0-126 | 0 |
-| Multicast Address | TSL multicast group | 239.1.2.3 |
-| TSL Port | UDP port | 8901 |
-| Max Brightness | LED brightness limit (1-255) | 50 |
-| LED Animation | How an active tally is drawn: Solid or Spin | Solid |
+| TSL Address | Tally address 0-126 (applies live) | 0 |
+| Multicast Address | TSL multicast group, 224-239.x.x.x (reboots) | 239.1.2.3 |
+| TSL Port | UDP port (reboots) | 8901 |
+
+### LED Settings
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Max Brightness | LED brightness limit (1-255), applies live | 50 |
+| LED Animation | How an active tally is drawn: Solid or Spin, applies live | Solid |
 
 TSL brightness levels map to the LEDs as a fraction of Max Brightness:
 
@@ -110,27 +116,20 @@ TSL brightness levels map to the LEDs as a fraction of Max Brightness:
 
 **LED Animation** controls how Green, Red and Yellow are shown on the ring. **Solid** lights all seven LEDs. **Spin** keeps the middle LED on at the tally colour, holds the outer six at a dim level and sweeps a bright point with a fading tail round them (one revolution every 0.8 s). Off is always dark. The firmware assumes the middle LED is first in the data chain (`CENTER_LED 0` in main.cpp); set it to 6 if the ring is wired before the middle.
 
+### Network Settings
+
+Hostname, DHCP or static IP (address, gateway, subnet, DNS). Applies to Ethernet and WiFi. Changes here reboot the device.
+
 ### WiFi Settings
 
 | Setting | Description |
 |---------|-------------|
-| WiFi Enable | Enable/disable WiFi client |
+| WiFi | Disabled, or Enabled (used when Ethernet is down) |
 | SSID | WiFi network name |
 | Scan for Networks | Lists nearby networks, strongest first, one row per SSID with a lock for secured networks. Tap a row to fill in the SSID. Works in Ethernet, WiFi and AP mode |
-| Password | WiFi password |
+| Password | WiFi password, masked with a **Show password** toggle |
 
-### Ethernet Settings
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| Hostname | Device hostname for mDNS | Tally-XXYYZZ (unique per device) |
-| IP Mode | DHCP or Static | DHCP |
-| Static IP | IP address (if static) | 192.168.1.100 |
-| Gateway | Gateway address | 192.168.1.1 |
-| Subnet | Subnet mask | 255.255.255.0 |
-| DNS | DNS server | 8.8.8.8 |
-
-Saving settings reboots the device.
+Changes here reboot the device.
 
 ## Network Modes
 
@@ -163,9 +162,9 @@ When no network is available, the device creates its own access point:
 | Red blink | Factory reset in progress |
 | Blue flash | Factory reset complete |
 | Red, green, blue cycle | Network connected, ready |
-| Purple (solid) | GitHub firmware update in progress |
-| Green (solid) then reboot | GitHub firmware update succeeded |
-| Red (2 s) | GitHub firmware update failed |
+| Purple (solid) | Firmware update in progress |
+| Green (solid) then reboot | Firmware update succeeded |
+| Red (2 s) | Firmware update failed, then back to the current tally |
 
 The boot stages use the same spin animation as the **LED Animation** setting: the middle LED stays on in the stage colour, the outer six glow dimly and a bright point with a fading tail sweeps round them.
 
@@ -205,8 +204,9 @@ The text label is filtered to printable ASCII and trimmed.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Configuration page |
-| `/status` | GET | JSON status (tally, text, IP, connection) |
+| `/` | GET | Configuration page (static; fills itself from `/api/config` and `/status`) |
+| `/status` | GET | JSON status (tally, text, IP, connection, TSL packet count, age and sender) |
+| `/api/config` | GET | JSON of every setting plus hostname, MAC, AP details, firmware and build |
 | `/info` | GET | JSON device info (hostname, MAC, TSL address, firmware, build) |
 | `/test?state=N` | GET | Set tally state (0-3) at max brightness |
 | `/test?restore=1` | GET | Return to the last state received over TSL |
@@ -214,9 +214,9 @@ The text label is filtered to printable ASCII and trimmed.
 | `/api/wifi-scan` | GET | Start an async WiFi scan (`?start=1`) or return its result; `{"scanning":true}` while running |
 | `/disco?duration=N` | GET | Start disco mode for N seconds (1-120, default 30) |
 | `/disco-stop` | GET | Stop disco mode and restore the tally state |
-| `/api/check-update` | GET | Check GitHub for firmware updates |
-| `/api/update` | GET | Download and install firmware from GitHub |
-| `/save` | POST | Save settings and reboot |
+| `/api/check-update` | GET | Fetch the release manifest; returns current, latest, date and notes |
+| `/api/update` | GET | Download and install the firmware named in the manifest |
+| `/save` | POST | Save settings; applies live, or reboots if network, hostname or TSL socket settings changed |
 | `/reset` | GET | Factory reset and reboot |
 
 `/status`, `/test`, `/info`, `/disco` and `/disco-stop` send `Access-Control-Allow-Origin: *` so one tally's page can drive the others.
@@ -230,9 +230,14 @@ In AP mode, the captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, `/conne
   "tally": "Green",
   "text": "CAM 1",
   "ip": "192.168.1.100",
-  "connection": "Ethernet"
+  "connection": "Ethernet",
+  "pkts": 1234,
+  "age": 480,
+  "from": "192.168.1.10"
 }
 ```
+
+`pkts` counts packets addressed to this device since boot, `age` is milliseconds since the last one, `from` is its sender.
 
 ### Info Response
 
@@ -264,18 +269,20 @@ In AP mode, the captive-portal probe URLs (`/generate_204`, `/ncsi.txt`, `/conne
 
 ## OTA Updates
 
-OTA is enabled when connected via Ethernet or WiFi (not in AP mode).
+### From the web page
 
-### GitHub Release Updates (Recommended)
+Click **Check** on the System tab. If a newer version exists a popup lists the release notes with **Install** and **Later**; Install shows progress and reloads the page when the device is back. After an update, the page shows a "What's new" popup once per browser.
 
-Devices can check for and install updates directly from GitHub releases:
+The device fetches `https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-update.json` (URL in [src/main.cpp](src/main.cpp)), compares `version` with its own, shows the release notes, and on Install downloads the binary at `url`. The `md5` in the manifest is checked before the new image is accepted.
 
-1. Open device web interface
-2. Click **Check** next to Firmware version
-3. If update available, click **Install**
-4. Device downloads firmware and reboots automatically
+Manifest format:
 
-The device reads `https://api.github.com/repos/videojedi/esp32-s3-tally/releases/latest` and installs the asset named `firmware.bin`.
+```json
+{"version":"1.1.0","url":"https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-1.1.0.bin",
+ "md5":"...","size":1304000,"release_date":"2026-09-07","notes":["Tabbed web page","..."]}
+```
+
+**Firmware 1.0.12 and earlier** looks for updates on GitHub releases instead (`https://api.github.com/repos/videojedi/esp32-s3-tally/releases/latest`, asset `firmware.bin`). The v1.1.0 GitHub release exists so those devices can reach the manifest-based firmware; after that they update from S3 like everything else.
 
 ### PlatformIO OTA
 
@@ -313,18 +320,13 @@ The script will:
 
 ### Creating Releases
 
-Use the release script to create a new GitHub release with firmware:
-
 ```bash
-./release.sh 1.0.11
+./release.sh 1.1.0 "Tabbed web page" "Light and dark themes"
 ```
 
-This will:
-1. Update FIRMWARE_VERSION in source
-2. Build the firmware
-3. Commit and tag the release
-4. Push to GitHub
-5. Create GitHub release with firmware.bin attached
+Bumps `FIRMWARE_VERSION`, builds, commits, tags, pushes, uploads `tsl-tally-<version>.bin` to S3 and rewrites the manifest with version, URL, MD5, size, date and the notes given as arguments. Safe to rerun for the same version. Needs the AWS CLI and a `.env` in the project root with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `S3_BUCKET` (not committed).
+
+`GITHUB=1 ./release.sh ...` also creates a GitHub release with `firmware.bin` attached, for devices still on 1.0.12 or earlier.
 
 ## Factory Reset
 
@@ -408,7 +410,7 @@ This separation ensures reliable multicast reception even when the web interface
 - ESPmDNS - mDNS responder and service discovery (`_tally._tcp` with TXT records)
 - NetworkUdp - UDP multicast
 - ArduinoOTA - Over-the-air updates
-- HTTPClient / WiFiClientSecure / Update - GitHub release updates
+- HTTPClient / WiFiClientSecure / Update - firmware updates from the release manifest
 - DNSServer - Captive portal support
 
 ## License

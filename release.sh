@@ -1,146 +1,144 @@
 #!/bin/bash
 #
-# Release Script for TSL Tally Light Firmware
-# Creates a new GitHub release with firmware binary attached
+# Release script for the TSL Tally Light firmware.
+# Bumps FIRMWARE_VERSION, builds, commits, tags, pushes, then uploads the binary and
+# the update manifest to the Video Walrus S3 bucket. Devices poll the manifest.
 #
-# Usage: ./release.sh <version>
-# Example: ./release.sh 1.0.1
+# Usage: ./release.sh <version> ["release note" ...]
+# Example: ./release.sh 1.1.0 "Tabbed web UI" "Light and dark theme"
+#
+# GITHUB=1 ./release.sh ...   also creates a GitHub release with firmware.bin attached.
+#   Firmware 1.0.12 and earlier looks for its updates on GitHub, so a release that
+#   those devices should be able to reach needs this. Devices on 1.1.0 or later use
+#   the S3 manifest and never look at GitHub again.
 #
 # Prerequisites:
-# - GitHub CLI (gh) installed and authenticated
+# - PlatformIO (pio) on PATH
+# - AWS CLI, and a .env in this directory with:
+#     AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...  AWS_REGION=us-east-1  S3_BUCKET=videowalrus-releases
 # - Git repository with remote 'origin'
+# - GitHub CLI (gh) authenticated, only when GITHUB=1
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PIO="/Users/richard/Library/Python/3.10/bin/pio"
-FIRMWARE_PATH=".pio/build/esp32-s3/firmware.bin"
-
-# Check for version argument
-if [ -z "$1" ]; then
-    echo "Usage: ./release.sh <version>"
-    echo "Example: ./release.sh 1.0.1"
-    exit 1
-fi
-
-VERSION="$1"
-TAG="v$VERSION"
-
-echo "=== TSL Tally Firmware Release ==="
-echo "Version: $VERSION"
-echo "Tag: $TAG"
-echo ""
-
-# Check if gh is installed
-if ! command -v gh &> /dev/null; then
-    echo "Error: GitHub CLI (gh) is not installed."
-    echo "Install with: brew install gh"
-    exit 1
-fi
-
-# Check if authenticated
-if ! gh auth status &> /dev/null; then
-    echo "Error: Not authenticated with GitHub CLI."
-    echo "Run: gh auth login"
-    exit 1
-fi
-
 cd "$SCRIPT_DIR"
 
-# Check for uncommitted changes
-if ! git diff-index --quiet HEAD --; then
-    echo "Warning: You have uncommitted changes."
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted."
-        exit 1
-    fi
-fi
+PIO="$(command -v pio || echo "$HOME/.platformio/penv/bin/pio")"
+FIRMWARE_PATH=".pio/build/esp32-s3/firmware.bin"
+MANIFEST_KEY="tsl-tally-update.json"
 
-# Update FIRMWARE_VERSION in source
-echo "Updating FIRMWARE_VERSION to $VERSION..."
-sed -i '' "s/#define FIRMWARE_VERSION \"[^\"]*\"/#define FIRMWARE_VERSION \"$VERSION\"/" src/main.cpp
-
-# Verify the change
-CURRENT_VERSION=$(grep '#define FIRMWARE_VERSION' src/main.cpp | sed 's/.*"\([^"]*\)".*/\1/')
-if [ "$CURRENT_VERSION" != "$VERSION" ]; then
-    echo "Error: Failed to update FIRMWARE_VERSION"
+if [ -z "$1" ]; then
+    echo "Usage: ./release.sh <version> [\"release note\" ...]"
     exit 1
 fi
-echo "FIRMWARE_VERSION updated to: $CURRENT_VERSION"
+VERSION="$1"; shift
+NOTES=("$@")
+TAG="v$VERSION"
+BIN_KEY="tsl-tally-$VERSION.bin"
 
-# Build firmware
+echo "=== TSL Tally Firmware Release ==="
+echo "Version: $VERSION   Tag: $TAG"
+echo ""
+
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
+: "${AWS_REGION:=us-east-1}"
+: "${S3_BUCKET:=videowalrus-releases}"
+BASE_URL="https://$S3_BUCKET.s3.$AWS_REGION.amazonaws.com"
+
+command -v aws >/dev/null || { echo "Error: aws CLI not installed"; exit 1; }
+aws sts get-caller-identity >/dev/null 2>&1 || { echo "Error: AWS credentials not available (create .env)"; exit 1; }
+if [ -n "$GITHUB" ]; then
+    command -v gh >/dev/null || { echo "Error: GitHub CLI (gh) not installed"; exit 1; }
+    gh auth status >/dev/null 2>&1 || { echo "Error: not authenticated with gh"; exit 1; }
+fi
+
+if ! git diff-index --quiet HEAD --; then
+    echo "Warning: You have uncommitted changes."
+    read -p "Continue anyway? [y/N] " -n 1 -r; echo ""
+    [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+fi
+
+echo "Updating FIRMWARE_VERSION to $VERSION..."
+sed -i '' "s/#define FIRMWARE_VERSION \"[^\"]*\"/#define FIRMWARE_VERSION \"$VERSION\"/" src/main.cpp
+grep -q "#define FIRMWARE_VERSION \"$VERSION\"" src/main.cpp || { echo "Error: failed to update FIRMWARE_VERSION"; exit 1; }
+
 echo ""
 echo "Building firmware..."
 $PIO run -e esp32-s3
+[ -f "$FIRMWARE_PATH" ] || { echo "Error: firmware binary not found at $FIRMWARE_PATH"; exit 1; }
+SIZE=$(stat -f %z "$FIRMWARE_PATH")
+MD5=$(md5 -q "$FIRMWARE_PATH")
+echo "Firmware built: $FIRMWARE_PATH ($SIZE bytes, md5 $MD5)"
 
-if [ ! -f "$FIRMWARE_PATH" ]; then
-    echo "Error: Firmware binary not found at $FIRMWARE_PATH"
-    exit 1
-fi
-
-FIRMWARE_SIZE=$(ls -lh "$FIRMWARE_PATH" | awk '{print $5}')
-echo "Firmware built: $FIRMWARE_PATH ($FIRMWARE_SIZE)"
-
-# Commit version change
 echo ""
-echo "Committing version change..."
-git add src/main.cpp
-git commit -m "Release $TAG
+echo "Committing, tagging, pushing..."
+if git diff --quiet -- src/main.cpp; then
+    echo "FIRMWARE_VERSION was already $VERSION, no version commit needed"
+else
+    git add src/main.cpp
+    git commit -m "Release $TAG
 
 - Bump FIRMWARE_VERSION to $VERSION
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+fi
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    echo "Tag $TAG already exists, moving it to HEAD so it matches the uploaded binary"
+    git tag -f -a "$TAG" -m "Release $VERSION"
+    TAG_PUSH="--force"
+else
+    git tag -a "$TAG" -m "Release $VERSION"
+    TAG_PUSH=""
+fi
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+git push origin "$BRANCH"
+git push $TAG_PUSH origin "$TAG"
 
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-
-# Create git tag
 echo ""
-echo "Creating git tag $TAG..."
-git tag -a "$TAG" -m "Release $VERSION"
+echo "Uploading to s3://$S3_BUCKET..."
+aws s3 cp "$FIRMWARE_PATH" "s3://$S3_BUCKET/$BIN_KEY" --content-type "application/octet-stream"
 
-# Push to GitHub
-echo ""
-echo "Pushing to GitHub..."
-git push origin master
-git push origin "$TAG"
+mkdir -p dist
+NOTES_JSON=$(printf '%s\n' "${NOTES[@]}" | python3 -c 'import sys,json; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.strip()]))')
+cat > "dist/$MANIFEST_KEY" <<JSON
+{
+  "version": "$VERSION",
+  "url": "$BASE_URL/$BIN_KEY",
+  "md5": "$MD5",
+  "size": $SIZE,
+  "release_date": "$(date +%Y-%m-%d)",
+  "notes": $NOTES_JSON
+}
+JSON
+aws s3 cp "dist/$MANIFEST_KEY" "s3://$S3_BUCKET/$MANIFEST_KEY" --content-type "application/json" --cache-control "no-cache"
 
-# Create GitHub release with firmware binary
-echo ""
-echo "Creating GitHub release..."
-gh release create "$TAG" \
-    --title "TSL Tally Firmware $TAG" \
-    --notes "## TSL Tally Light Firmware $VERSION
-
-### Installation
-
-#### New Devices
-Flash via USB:
-\`\`\`bash
-pio run -t upload
-\`\`\`
-
-#### Existing Devices (OTA)
-1. Open device web interface
-2. Click **Check** next to Firmware version
-3. Click **Install** when update is available
-
-Or use bulk update script:
-\`\`\`bash
-./ota-update-all.sh <any-device-ip>
-\`\`\`
-
-### Firmware Binary
-Download \`firmware.bin\` below and flash manually if needed.
-" \
-    "$FIRMWARE_PATH"
+if [ -n "$GITHUB" ]; then
+    echo ""
+    echo "Creating GitHub release (legacy update path for firmware 1.0.12 and earlier)..."
+    BODY="## TSL Tally Light Firmware $VERSION"$'\n'
+    if [ ${#NOTES[@]} -gt 0 ]; then
+        BODY+=$'\n'"### What's New"$'\n'
+        for n in "${NOTES[@]}"; do BODY+="- $n"$'\n'; done
+    fi
+    BODY+=$'\n'"### Installation"$'\n\n'
+    BODY+="Devices on 1.0.12 or earlier: click **Check** then **Install** on the web page, or run \`./ota-update-all.sh <any-device-ip>\`."$'\n'
+    BODY+="Devices on 1.1.0 or later update from the S3 manifest and do not use this page."$'\n\n'
+    BODY+="New devices: \`pio run -t upload\` over USB, or flash \`firmware.bin\` below manually."$'\n'
+    if gh release view "$TAG" >/dev/null 2>&1; then
+        echo "Release $TAG already exists, replacing its firmware.bin"
+        gh release upload "$TAG" "$FIRMWARE_PATH" --clobber
+        gh release edit "$TAG" --notes "$BODY"
+    else
+        gh release create "$TAG" --title "TSL Tally Firmware $TAG" --notes "$BODY" "$FIRMWARE_PATH"
+    fi
+fi
 
 echo ""
 echo "=== Release Complete ==="
-echo ""
-echo "Release URL: https://github.com/videojedi/esp32-s3-tally/releases/tag/$TAG"
-echo ""
-echo "Devices can now update via:"
-echo "  1. Web UI: Click 'Check' then 'Install'"
-echo "  2. Script: ./ota-update-all.sh <device-ip>"
+echo "Binary:   $BASE_URL/$BIN_KEY"
+echo "Manifest: $BASE_URL/$MANIFEST_KEY"
+[ -n "$GITHUB" ] && echo "GitHub:   https://github.com/videojedi/esp32-s3-tally/releases/tag/$TAG"
+cat "dist/$MANIFEST_KEY"

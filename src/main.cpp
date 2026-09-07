@@ -37,10 +37,11 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Update.h>
+#include "webpage.h"
 
-// GitHub OTA Update configuration
-#define GITHUB_REPO "videojedi/esp32-s3-tally"
-#define GITHUB_API_URL "https://api.github.com/repos/videojedi/esp32-s3-tally/releases/latest"
+// OTA update manifest published by release.sh (see otaCheck)
+#define MANIFEST_URL "https://videowalrus-releases.s3.us-east-1.amazonaws.com/tsl-tally-update.json"
+#define OTA_MAX_NOTES 8
 
 // Forward declarations
 void loadSettings();
@@ -49,8 +50,7 @@ void resetSettings();
 void checkResetButton();
 void onEvent(arduino_event_id_t event);
 void setupWebServer();
-String getConfigPage();
-void udpTSL(char *data);
+bool udpTSL(char *data);
 void setTallyState(int state, int brightness = -1);  // brightness < 0 = maxBrightness
 void renderSpinFrame(CRGB colour, uint8_t brightness);
 void spinDelay(CRGB colour, unsigned long ms);
@@ -133,6 +133,11 @@ String currentTallyText = "";
 // Last state/brightness received over TSL; restored when a test button is released
 volatile int tslState = 0;
 volatile int tslBrightness = -1;
+volatile int tslBrightRaw = -1;  // 0-3 as received, -1 = nothing received yet
+// Packets received for this address, shown on the status page
+volatile uint32_t tslPackets = 0;
+volatile unsigned long tslLastMs = 0;
+volatile uint32_t tslLastFrom = 0;  // IPv4 of the last sender
 
 // Structure for discovered tally devices
 struct TallyDevice {
@@ -148,11 +153,15 @@ TallyDevice discoveredDevices[MAX_DISCOVERED_DEVICES];
 int numDiscoveredDevices = 0;
 unsigned long lastDiscoveryScan = 0;
 
-// GitHub OTA update state
+// OTA update state, from the release manifest
 String latestVersion = "";
 String firmwareURL = "";
+String firmwareMD5 = "";
+String releaseDate = "";
+String otaNotes[OTA_MAX_NOTES];
+int otaNoteCount = 0;
 bool updateAvailable = false;
-bool updateInProgress = false;
+volatile bool updateInProgress = false;
 
 // Generate unique default hostname using ESP32 base MAC address
 String getDefaultHostname() {
@@ -531,7 +540,9 @@ void setTallyState(int state, int brightness) {
   tallyColour = colour;
   tallyLevel = brightness < 0 ? maxBrightness : brightness;
   spinActive = (ledAnimation == LED_ANIM_SPIN && state != 0);
-  if (spinActive) {
+  if (updateInProgress) {
+    // otaInstall() owns the LEDs; the state is redrawn when it finishes or fails
+  } else if (spinActive) {
     renderSpinFrame(tallyColour, tallyLevel);
   } else {
     FastLED.setBrightness(tallyLevel);
@@ -541,7 +552,7 @@ void setTallyState(int state, int brightness) {
   ledUnlock();
 }
 
-void udpTSL(char *data) {
+bool udpTSL(char *data) {
   char* message;
   int T;
   int Bright;
@@ -566,15 +577,17 @@ void udpTSL(char *data) {
     currentTallyText = text;
     Serial.printf("Text: %s\n", text.c_str());
 
-    Bright = message[1] & 0b00110000;
-    Bright = Bright >> 4;
+    Bright = (message[1] & 0b00110000) >> 4;
+    tslBrightRaw = Bright;
     Bright = map(Bright, 0, 3, 0, maxBrightness);
     Serial.printf("Brightness: %d\n", Bright);
 
     tslState = T;
     tslBrightness = Bright;
     setTallyState(T, Bright);  // setTallyState applies brightness before show()
+    return true;
   }
+  return false;
 }
 
 // Start UDP multicast listener
@@ -618,7 +631,11 @@ void udpListenerTask(void *pvParameters) {
           buffer[len] = '\0';
           Serial.printf("[UDP] From %s:%d, Length: %d\n",
                         remote.toString().c_str(), port, len);
-          udpTSL(buffer);
+          if (udpTSL(buffer)) {
+            tslPackets++;
+            tslLastMs = millis();
+            tslLastFrom = (uint32_t)remote;
+          }
         }
       }
     }
@@ -729,170 +746,162 @@ void discoverTallyDevices() {
   Serial.printf("[Discovery] Total devices found: %d\n", numDiscoveredDevices);
 }
 
-// Compare version strings (returns true if v2 > v1)
+// ---- OTA updates from the release manifest ----
+// release.sh uploads the binary and this manifest to S3:
+//   {"version":"1.1.0","url":"https://.../tsl-tally-1.1.0.bin","md5":"...","size":1300000,
+//    "release_date":"2026-09-07","notes":["...","..."]}
+
+// True if v2 is newer than v1 ("v" prefix optional)
 bool isNewerVersion(const String& v1, const String& v2) {
-  // Strip 'v' prefix if present
-  String ver1 = v1.startsWith("v") ? v1.substring(1) : v1;
-  String ver2 = v2.startsWith("v") ? v2.substring(1) : v2;
-
-  // Simple string comparison works for semantic versioning
-  // e.g., "1.0.1" > "1.0.0", "1.1.0" > "1.0.9"
-  int parts1[3] = {0, 0, 0};
-  int parts2[3] = {0, 0, 0};
-
-  sscanf(ver1.c_str(), "%d.%d.%d", &parts1[0], &parts1[1], &parts1[2]);
-  sscanf(ver2.c_str(), "%d.%d.%d", &parts2[0], &parts2[1], &parts2[2]);
-
+  String a = v1.startsWith("v") ? v1.substring(1) : v1;
+  String b = v2.startsWith("v") ? v2.substring(1) : v2;
+  int p1[3] = {0, 0, 0}, p2[3] = {0, 0, 0};
+  sscanf(a.c_str(), "%d.%d.%d", &p1[0], &p1[1], &p1[2]);
+  sscanf(b.c_str(), "%d.%d.%d", &p2[0], &p2[1], &p2[2]);
   for (int i = 0; i < 3; i++) {
-    if (parts2[i] > parts1[i]) return true;
-    if (parts2[i] < parts1[i]) return false;
+    if (p2[i] > p1[i]) return true;
+    if (p2[i] < p1[i]) return false;
   }
   return false;
 }
 
-// Check GitHub for firmware updates
-void checkForUpdates() {
+// Value of a string field "key":"value" in the flat manifest (no escapes expected)
+static String jsonString(const String& j, const char* key) {
+  String k = String("\"") + key + "\":";
+  int p = j.indexOf(k);
+  if (p < 0) return "";
+  p = j.indexOf('"', p + k.length());
+  if (p < 0) return "";
+  int e = j.indexOf('"', p + 1);
+  if (e < 0) return "";
+  return j.substring(p + 1, e);
+}
+
+// Strings of the "notes" array into otaNotes[], quotes and backslash escapes handled
+static void parseNotes(const String& j) {
+  otaNoteCount = 0;
+  int p = j.indexOf("\"notes\":");
+  if (p < 0) return;
+  p = j.indexOf('[', p);
+  if (p < 0) return;
+  int end = j.indexOf(']', p);
+  if (end < 0) return;
+  int i = p + 1;
+  while (i < end && otaNoteCount < OTA_MAX_NOTES) {
+    int q = j.indexOf('"', i);
+    if (q < 0 || q > end) break;
+    String s;
+    int k = q + 1;
+    while (k < end) {
+      char c = j[k];
+      if (c == '\\' && k + 1 < end) { s += j[k + 1]; k += 2; continue; }
+      if (c == '"') break;
+      s += c;
+      k++;
+    }
+    otaNotes[otaNoteCount++] = s;
+    i = k + 1;
+  }
+}
+
+// Fetch the manifest and compare its version with ours
+void otaCheck() {
   if (!eth_connected && !wifi_connected) {
     Serial.println("[Update] No network connection");
     return;
   }
+  Serial.println("[Update] Fetching release manifest...");
 
-  Serial.println("[Update] Checking GitHub for updates...");
-
-  // Use WiFiClientSecure for HTTPS
   WiFiClientSecure client;
-  client.setInsecure();  // Skip certificate verification
+  client.setInsecure();  // S3 certificate chain is not verified
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(10000);
-  http.begin(client, GITHUB_API_URL);
+  http.begin(client, String(MANIFEST_URL) + "?t=" + String(millis()));  // defeat caches
   http.addHeader("User-Agent", "ESP32-Tally-OTA");
-  http.addHeader("Accept", "application/vnd.github.v3+json");
 
-  int httpCode = http.GET();
-  Serial.printf("[Update] GitHub API response: %d\n", httpCode);
+  int code = http.GET();
+  Serial.printf("[Update] Manifest response: %d\n", code);
 
-  if (httpCode == 200) {
+  if (code == 200) {
     String payload = http.getString();
+    latestVersion = jsonString(payload, "version");
+    firmwareURL   = jsonString(payload, "url");
+    firmwareMD5   = jsonString(payload, "md5");
+    releaseDate   = jsonString(payload, "release_date");
+    parseNotes(payload);
+    Serial.printf("[Update] Latest: %s, Current: %s, %d notes\n", latestVersion.c_str(), FIRMWARE_VERSION, otaNoteCount);
 
-    // Parse tag_name for version
-    int tagStart = payload.indexOf("\"tag_name\":\"");
-    if (tagStart > 0) {
-      tagStart += 12;
-      int tagEnd = payload.indexOf("\"", tagStart);
-      latestVersion = payload.substring(tagStart, tagEnd);
-      Serial.printf("[Update] Latest version: %s, Current: %s\n",
-                    latestVersion.c_str(), FIRMWARE_VERSION);
-    }
-
-    // Find firmware.bin in assets
-    int assetsStart = payload.indexOf("\"assets\":");
-    if (assetsStart > 0) {
-      int binStart = payload.indexOf("\"browser_download_url\":", assetsStart);
-      while (binStart > 0) {
-        binStart += 24;
-        int binEnd = payload.indexOf("\"", binStart);
-        String url = payload.substring(binStart, binEnd);
-        if (url.endsWith("firmware.bin")) {
-          firmwareURL = url;
-          Serial.printf("[Update] Firmware URL: %s\n", firmwareURL.c_str());
-          break;
-        }
-        binStart = payload.indexOf("\"browser_download_url\":", binEnd);
-      }
-    }
-
-    // Check if update is available
-    if (latestVersion.length() > 0 && isNewerVersion(FIRMWARE_VERSION, latestVersion)) {
-      updateAvailable = true;
-      Serial.println("[Update] New version available!");
-    } else {
-      updateAvailable = false;
-      Serial.println("[Update] Firmware is up to date");
-    }
+    updateAvailable = latestVersion.length() > 0 && firmwareURL.startsWith("https://") &&
+                      isNewerVersion(FIRMWARE_VERSION, latestVersion);
+    Serial.println(updateAvailable ? "[Update] New version available" : "[Update] Firmware is up to date");
   } else {
-    Serial.printf("[Update] Failed to check for updates: %d\n", httpCode);
+    Serial.printf("[Update] Check failed: %d\n", code);
   }
-
   http.end();
 }
 
-// Perform OTA update from GitHub
-void performOTAUpdate() {
+// Download the binary from the manifest URL and flash it. The manifest MD5 is checked
+// by Update.end() before the new image is accepted.
+void otaInstall() {
   if (firmwareURL.length() == 0) {
-    Serial.println("[Update] No firmware URL available");
+    Serial.println("[Update] No firmware URL");
     return;
   }
+  if (updateInProgress) return;
+  updateInProgress = true;  // setTallyState() leaves the LEDs alone until this clears
+  Serial.printf("[Update] Downloading %s\n", firmwareURL.c_str());
 
-  if (updateInProgress) {
-    Serial.println("[Update] Update already in progress");
-    return;
-  }
-
-  updateInProgress = true;
-  Serial.printf("[Update] Downloading firmware from: %s\n", firmwareURL.c_str());
-
-  // Show update in progress on LEDs
-  fill_solid(leds, NUM_LEDS, CRGB::Purple);
+  ledLock();
+  FastLED.setBrightness(maxBrightness);
+  fill_solid(leds, NUM_LEDS, CRGB::Purple);  // purple while updating
   FastLED.show();
+  ledUnlock();
 
-  // Use WiFiClientSecure for HTTPS
   WiFiClientSecure client;
-  client.setInsecure();  // Skip certificate verification for GitHub
+  client.setInsecure();
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(60000);  // 60 second timeout for large downloads
+  http.setTimeout(60000);
   http.begin(client, firmwareURL);
 
-  Serial.println("[Update] Starting download...");
-  int httpCode = http.GET();
-  Serial.printf("[Update] Download response: %d\n", httpCode);
+  int code = http.GET();
+  Serial.printf("[Update] Download response: %d\n", code);
 
-  if (httpCode == 200) {
-    int contentLength = http.getSize();
-    Serial.printf("[Update] Firmware size: %d bytes\n", contentLength);
-
-    if (contentLength > 0) {
-      if (Update.begin(contentLength)) {
-        Serial.println("[Update] Starting OTA flash...");
-
-        size_t written = Update.writeStream(client);
-        Serial.printf("[Update] Written: %d bytes\n", written);
-
-        if (Update.end()) {
-          if (Update.isFinished()) {
-            Serial.println("[Update] Update successful! Rebooting...");
-            fill_solid(leds, NUM_LEDS, CRGB::Green);
-            FastLED.show();
-            delay(1000);
-            ESP.restart();
-          } else {
-            Serial.println("[Update] Update not finished");
-          }
-        } else {
-          Serial.printf("[Update] Update error: %s\n", Update.errorString());
-        }
+  if (code == 200) {
+    int len = http.getSize();
+    Serial.printf("[Update] Firmware size: %d bytes\n", len);
+    if (len > 0 && Update.begin(len)) {
+      if (firmwareMD5.length() == 32) Update.setMD5(firmwareMD5.c_str());
+      size_t written = Update.writeStream(client);
+      Serial.printf("[Update] Written: %u bytes\n", (unsigned)written);
+      if (Update.end() && Update.isFinished()) {
+        Serial.println("[Update] Success, rebooting...");
+        ledLock();
+        fill_solid(leds, NUM_LEDS, CRGB::Green);
+        FastLED.show();
+        ledUnlock();
+        delay(1000);
+        ESP.restart();
       } else {
-        Serial.printf("[Update] Not enough space: %s\n", Update.errorString());
+        Serial.printf("[Update] Error: %s\n", Update.errorString());
       }
     } else {
-      Serial.println("[Update] Invalid content length");
+      Serial.printf("[Update] Cannot begin update: %s\n", Update.errorString());
     }
-  } else {
-    Serial.printf("[Update] Download failed: %d\n", httpCode);
   }
-
   http.end();
   updateInProgress = false;
 
-  // Restore LED state on failure
+  // Failed: show red for two seconds, then back to the current tally
+  ledLock();
   fill_solid(leds, NUM_LEDS, CRGB::Red);
   FastLED.show();
+  ledUnlock();
   delay(2000);
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
+  setTallyState(tslState, tslBrightness);
 }
 
 // LED test routine - cycles through R/G/B
@@ -954,369 +963,208 @@ String jsonEscape(const String& s) {
   return out;
 }
 
-// HTML page for configuration
-String getConfigPage() {
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta charset=\"utf-8\">";
-  html += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
-  html += "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23ff0000'/></svg>\">";
-  html += "<title>TSL Tally Configuration</title>";
-  html += "<style>";
-  html += "body{font-family:Arial,sans-serif;margin:20px;background:#1a1a2e;color:#eee;transition:background-color 0.3s}";
-  html += "body.tally-off{background:#1a1a2e}body.tally-green{background:#0a3d0a}body.tally-red{background:#4d0000}body.tally-yellow{background:#4d4d00}";
-  html += ".container{max-width:500px;margin:0 auto}";
-  html += "h1{color:#00d4ff;text-align:center}";
-  html += ".card{background:#16213e;padding:20px;border-radius:10px;margin-bottom:20px}";
-  html += ".card h2{margin-top:0;color:#00d4ff;border-bottom:1px solid #0f3460;padding-bottom:10px}";
-  html += "label{display:block;width:fit-content;margin:10px 0 5px;font-weight:bold}";
-  html += "input[type=text],input[type=number],input[type=password],select{width:100%;padding:10px;border:1px solid #0f3460;border-radius:5px;background:#0f3460;color:#eee;box-sizing:border-box;font-size:16px}";
-  html += "input:focus,select:focus{outline:none;border-color:#00d4ff}";
-  html += ".masked{-webkit-text-security:disc}";
-  html += ".ip-fields,.wifi-fields{display:none}.ip-fields.show,.wifi-fields.show{display:block}";
-  html += "button{width:100%;padding:15px;background:#00d4ff;color:#1a1a2e;border:none;border-radius:5px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:20px}";
-  html += "button:hover{background:#00b4d8}";
-  html += ".test-btns{display:flex;gap:10px;margin-top:10px}";
-  html += ".test-btn{flex:1;padding:15px 10px;border:none;border-radius:5px;font-weight:bold;cursor:pointer;font-size:14px}";
-  html += ".test-btn:hover{opacity:0.8}";
-  html += ".btn-green{background:#0f0;color:#000}.btn-red{background:#f00;color:#fff}.btn-yellow{background:#ff0;color:#000}";
-  html += ".status{background:#0f3460;padding:15px;border-radius:5px;margin-bottom:20px}";
-  html += ".status-item{display:flex;justify-content:space-between;padding:5px 0}";
-  html += ".tally-off{color:#888}.tally-green{color:#0f0}.tally-red{color:#f00}.tally-yellow{color:#ff0}";
-  html += ".note{font-size:12px;color:#888;margin-top:5px}";
-  html += ".conn-eth{color:#4CAF50}.conn-wifi{color:#2196F3}.conn-ap{color:#FF9800}";
-  html += ".device-list{max-height:300px;overflow-y:auto}";
-  html += ".device-item{display:flex;align-items:center;padding:10px;background:#0f3460;border-radius:5px;margin-bottom:8px}";
-  html += ".device-status{width:12px;height:12px;border-radius:50%;margin-right:10px;flex-shrink:0}";
-  html += ".device-status.off{background:#666}.device-status.green{background:#0f0}.device-status.red{background:#f00}.device-status.yellow{background:#ff0}";
-  html += ".device-info{flex:1;min-width:0}";
-  html += ".device-name{font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
-  html += ".device-details{font-size:12px;color:#888}";
-  html += ".device-link{padding:8px 12px;background:#00d4ff;color:#1a1a2e;text-decoration:none;border-radius:4px;font-size:12px;white-space:nowrap}";
-  html += ".device-link:hover{background:#00b4d8}";
-  html += ".refresh-btn{background:#0f3460;color:#eee;padding:8px 15px;margin-bottom:15px}";
-  html += ".refresh-btn:hover{background:#1a4a7a}";
-  html += ".scan-btn{background:#0f3460;color:#eee;padding:8px 15px;margin-top:8px;font-size:14px}.scan-btn:hover{background:#1a4a7a}.scan-btn:disabled{opacity:0.6;cursor:default}";
-  html += ".wifi-list{display:none;max-height:220px;overflow-y:auto;margin-top:8px}.wifi-list.show{display:block}";
-  html += ".wifi-item{display:flex;align-items:center;padding:10px;background:#0f3460;border-radius:5px;margin-bottom:6px;cursor:pointer}.wifi-item:hover{background:#1a4a7a}";
-  html += ".wifi-name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
-  html += ".wifi-meta{font-size:12px;color:#888;margin-left:10px;white-space:nowrap;letter-spacing:1px}";
-  html += ".bulk-btns{display:flex;gap:8px;margin-top:15px}";
-  html += ".bulk-btn{flex:1;padding:10px;font-size:12px;margin-top:0}";
-  html += ".no-devices{text-align:center;color:#666;padding:20px}";
-  html += ".disco-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:9999;justify-content:center;align-items:center;flex-direction:column}";
-  html += ".disco-overlay.active{display:flex}";
-  html += ".disco-text{font-size:48px;font-weight:bold;text-align:center;animation:disco-rainbow 0.5s linear infinite}";
-  html += "@keyframes disco-rainbow{0%{color:#f00}16%{color:#ff0}33%{color:#0f0}50%{color:#0ff}66%{color:#00f}83%{color:#f0f}100%{color:#f00}}";
-  html += ".disco-cancel{margin-top:40px;padding:20px 40px;font-size:20px;background:#c00;border:none;color:#fff;border-radius:10px;cursor:pointer}";
-  html += ".disco-cancel:hover{background:#f00}";
-  html += "</style></head><body><div class=\"container\">";
-  html += "<h1>TSL Tally Configuration</h1>";
+// ---- Web server ----
 
-  // Status section
-  html += "<div class=\"status\">";
-  html += "<div class=\"status-item\"><span>Connection:</span><span>" + getConnectionStatus() + "</span></div>";
-  html += "<div class=\"status-item\"><span>IP Address:</span><span id=\"currentIP\">" + getActiveIP() + "</span></div>";
-  html += "<div class=\"status-item\"><span>Tally State:</span><span id=\"tallyState\" class=\"tally-" + currentTallyState + "\">" + currentTallyState + "</span></div>";
-  html += "<div class=\"status-item\"><span>TSL Text:</span><span id=\"tallyText\">" + (currentTallyText.length() > 0 ? htmlEscape(currentTallyText) : String("-")) + "</span></div>";
-  if (eth_connected) {
-    html += "<div class=\"status-item\"><span>ETH MAC:</span><span>" + ETH.macAddress() + "</span></div>";
+static String q(const String& s) { return "\"" + jsonEscape(s) + "\""; }
+static String b(bool v) { return v ? "true" : "false"; }
+
+static void sendJson(const String& json, bool cors = false) {
+  if (cors) server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", json);
+}
+
+static void redirectHome() {
+  server.sendHeader("Location", "http://" + getActiveIP() + "/");
+  server.send(302, "text/plain", "");
+}
+
+// Small themed page for the reboot / reset responses
+static String messagePage(const String& title, const String& body, const String& colour) {
+  String r = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+  r += "<title>" + title + "</title>";
+  r += "<meta name=\"color-scheme\" content=\"dark light\"><script>try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>";
+  r += "<style>:root{color-scheme:dark;--bg:#1a1a2e;--fg:#eee;--link:#00d4ff}@media(prefers-color-scheme:light){:root:not([data-theme=dark]){color-scheme:light;--bg:#f2f4f8;--fg:#1a1a2e;--link:#0077a8}}:root[data-theme=light]{color-scheme:light;--bg:#f2f4f8;--fg:#1a1a2e;--link:#0077a8}";
+  r += "body{font-family:Arial,sans-serif;background:var(--bg);color:var(--fg);display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.m{text-align:center;padding:20px}h1{color:" + colour + "}a{color:var(--link)}</style>";
+  r += "</head><body><div class=\"m\"><h1>" + title + "</h1>" + body + "</div></body></html>";
+  return r;
+}
+
+static String activeMac() {
+  if (eth_connected) return ETH.macAddress();
+  if (ap_mode && !wifi_connected) return WiFi.softAPmacAddress();
+  return WiFi.macAddress();
+}
+
+// Polled every second by the page, and by other tally lights for their device list
+static String statusJson() {
+  String j = "{\"tally\":" + q(currentTallyState) + ",\"text\":" + q(currentTallyText);
+  j += ",\"ip\":" + q(getActiveIP()) + ",\"connection\":" + q(getConnectionStatus());
+  j += ",\"pkts\":" + String((unsigned long)tslPackets);
+  j += ",\"age\":" + String(tslLastMs ? (unsigned long)(millis() - tslLastMs) : 0UL);
+  j += ",\"from\":" + q(IPAddress((uint32_t)tslLastFrom).toString()) + "}";
+  return j;
+}
+
+// Everything the page needs to fill its form and header
+static String configJson() {
+  String j = "{";
+  j += "\"hostname\":" + q(deviceHostname) + ",";
+  j += "\"dhcp\":" + b(useDHCP) + ",";
+  j += "\"ip\":" + q(staticIP) + ",\"gw\":" + q(gateway) + ",\"sn\":" + q(subnet) + ",\"dns\":" + q(dns) + ",";
+  j += "\"wifiEn\":" + b(wifiEnabled) + ",\"ssid\":" + q(wifiSSID) + ",\"pass\":" + q(wifiPassword) + ",";
+  j += "\"tslAddr\":" + String(tslAddress) + ",\"mcast\":" + q(tslMulticast) + ",\"port\":" + String(tslPort) + ",";
+  j += "\"maxBright\":" + String(maxBrightness) + ",\"ledAnim\":" + String(ledAnimation) + ",";
+  j += "\"apMode\":" + b(ap_mode) + ",\"apSsid\":" + q(ap_mode ? apSSID : String("Tally-XXXXXX-Setup")) + ",\"apPass\":" + q(apPassword) + ",";
+  j += "\"mac\":" + q(activeMac()) + ",";
+  j += "\"fw\":" + q(FIRMWARE_VERSION) + ",";
+  j += "\"build\":\"" __DATE__ " " __TIME__ "\"";
+  j += "}";
+  return j;
+}
+
+// Letters, digits and hyphens only, 32 max; spaces, underscores and dots become hyphens
+static String sanitizeHostname(String h) {
+  h.trim();
+  String out;
+  for (size_t i = 0; i < h.length() && out.length() < 32; i++) {
+    char c = h[i];
+    if (isalnum((unsigned char)c) || c == '-') out += c;
+    else if (c == ' ' || c == '_' || c == '.') out += '-';
   }
-  if (wifi_connected || ap_mode) {
-    html += "<div class=\"status-item\"><span>WiFi MAC:</span><span>" + WiFi.macAddress() + "</span></div>";
+  while (out.startsWith("-")) out.remove(0, 1);
+  while (out.endsWith("-")) out.remove(out.length() - 1);
+  if (out.length() == 0) out = getDefaultHostname();
+  return out;
+}
+
+static bool validIP(const String& s) {
+  IPAddress ip;
+  return ip.fromString(s);
+}
+
+// Save from the web form. Settings that only take effect at boot (network, WiFi,
+// hostname, TSL socket) reboot the device; the rest apply at once.
+static void handleSave() {
+  String bHost = deviceHostname, bIP = staticIP, bGW = gateway, bSN = subnet, bDNS = dns;
+  String bSSID = wifiSSID, bPass = wifiPassword, bMcast = tslMulticast;
+  bool bDHCP = useDHCP, bWifi = wifiEnabled;
+  int bPort = tslPort;
+
+  if (server.hasArg("tslAddr")) tslAddress = constrain(server.arg("tslAddr").toInt(), 0, 126);
+  if (server.hasArg("tslMcast")) {
+    String m = server.arg("tslMcast");
+    m.trim();
+    IPAddress ip;
+    if (ip.fromString(m) && ip[0] >= 224 && ip[0] <= 239) tslMulticast = m;
   }
-  if (ap_mode) {
-    html += "<div class=\"status-item\"><span>AP SSID:</span><span>" + apSSID + "</span></div>";
+  if (server.hasArg("tslPort")) {
+    long p = server.arg("tslPort").toInt();
+    if (p >= 1 && p <= 65535) tslPort = p;
   }
-  html += "<div class=\"status-item\"><span>Firmware:</span><span id=\"fwVersion\">" + String(FIRMWARE_VERSION) + "</span>";
-  html += "<button type=\"button\" onclick=\"checkUpdate()\" style=\"width:auto;margin-left:10px;margin-top:0;padding:4px 12px;font-size:11px;cursor:pointer\">Check</button></div>";
-  html += "<div class=\"status-item\" id=\"updateNotice\" style=\"display:none\"><span style=\"color:#ff6b6b\">Update Available:</span>";
-  html += "<span id=\"latestVersion\" style=\"color:#ff6b6b\"></span>";
-  html += "<button type=\"button\" onclick=\"installUpdate()\" style=\"margin-left:10px;padding:2px 8px;font-size:12px;background:#4CAF50;color:white;border:none;border-radius:3px;cursor:pointer\">Install</button></div>";
-  html += "</div>";
+  if (server.hasArg("maxBright")) maxBrightness = constrain(server.arg("maxBright").toInt(), 1, 255);
+  if (server.hasArg("ledAnim")) ledAnimation = server.arg("ledAnim") == "1" ? LED_ANIM_SPIN : LED_ANIM_SOLID;
 
-  // Test Tally buttons (momentary - on while pressed)
-  html += "<div class=\"card\"><h2>Test Tally</h2>";
-  html += "<p class=\"note\">Hold button to test</p>";
-  html += "<div class=\"test-btns\">";
-  html += "<button type=\"button\" class=\"test-btn btn-green\" onmousedown=\"testOn(1)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(1)\" ontouchend=\"event.preventDefault();testOff()\">GREEN</button>";
-  html += "<button type=\"button\" class=\"test-btn btn-red\" onmousedown=\"testOn(2)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(2)\" ontouchend=\"event.preventDefault();testOff()\">RED</button>";
-  html += "<button type=\"button\" class=\"test-btn btn-yellow\" onmousedown=\"testOn(3)\" onmouseup=\"testOff()\" ontouchstart=\"event.preventDefault();testOn(3)\" ontouchend=\"event.preventDefault();testOff()\">YELLOW</button>";
-  html += "</div></div>";
+  if (server.hasArg("hostname")) deviceHostname = sanitizeHostname(server.arg("hostname"));
+  if (server.hasArg("dhcp")) useDHCP = server.arg("dhcp") != "0";
+  if (server.hasArg("ip") && validIP(server.arg("ip")))   staticIP = server.arg("ip");
+  if (server.hasArg("gw") && validIP(server.arg("gw")))   gateway = server.arg("gw");
+  if (server.hasArg("sn") && validIP(server.arg("sn")))   subnet = server.arg("sn");
+  if (server.hasArg("dns") && validIP(server.arg("dns"))) dns = server.arg("dns");
 
-  // Network Devices section
-  html += "<div class=\"card\"><h2>Network Devices</h2>";
-  html += "<p class=\"note\">Discovers other TSL tally lights on the network via mDNS</p>";
-  html += "<button type=\"button\" class=\"refresh-btn\" onclick=\"discoverDevices()\">Scan Network</button>";
-  html += "<div id=\"deviceList\" class=\"device-list\"><p class=\"no-devices\">Click Scan to find devices</p></div>";
-  html += "<div class=\"bulk-btns\">";
-  html += "<button type=\"button\" class=\"bulk-btn btn-green\" onclick=\"bulkTest(1)\">All GREEN</button>";
-  html += "<button type=\"button\" class=\"bulk-btn btn-red\" onclick=\"bulkTest(2)\">All RED</button>";
-  html += "<button type=\"button\" class=\"bulk-btn\" onclick=\"bulkTest(0)\" style=\"background:#333;color:#fff\">All OFF</button>";
-  html += "</div>";
-  html += "</div>";
+  if (server.hasArg("wifiEn")) wifiEnabled = server.arg("wifiEn") == "1";
+  if (server.hasArg("wifiSSID")) wifiSSID = server.arg("wifiSSID");
+  if (server.hasArg("wifiPass")) wifiPassword = server.arg("wifiPass");
 
-  // Form
-  html += "<form action=\"/save\" method=\"POST\">";
-  // In AP mode every input starts readonly. WebKit's form classification (which the iOS
-  // Captive Network Assistant uses to pick a field to auto-focus) skips readonly fields,
-  // and iOS shows no keyboard for one. The script below clears readonly on a real tap or key.
-  String ro = ap_mode ? " readonly" : "";
+  saveSettings();
 
-  // TSL Settings
-  html += "<div class=\"card\"><h2>TSL Settings</h2>";
-  html += "<label for=\"tslAddr\">TSL Address (0-126)</label>";
-  html += "<input type=\"number\" id=\"tslAddr\" name=\"tslAddr\" min=\"0\" max=\"126\" value=\"" + String(tslAddress) + "\" required" + ro + ">";
-  html += "<label for=\"tslMcast\">Multicast Address</label>";
-  html += "<input type=\"text\" id=\"tslMcast\" name=\"tslMcast\" value=\"" + htmlEscape(tslMulticast) + "\" required" + ro + ">";
-  html += "<label for=\"tslPort\">TSL Port</label>";
-  html += "<input type=\"number\" id=\"tslPort\" name=\"tslPort\" min=\"1\" max=\"65535\" value=\"" + String(tslPort) + "\" required" + ro + ">";
-  html += "<label for=\"maxBright\">Max Brightness (1-255)</label>";
-  html += "<input type=\"number\" id=\"maxBright\" name=\"maxBright\" min=\"1\" max=\"255\" value=\"" + String(maxBrightness) + "\" required" + ro + ">";
-  html += "<p class=\"note\">TSL brightness (0-3) maps to 0 - max brightness</p>";
-  html += "<label for=\"ledAnim\">LED Animation</label>";
-  html += "<select id=\"ledAnim\" name=\"ledAnim\">";
-  html += "<option value=\"0\"" + String(ledAnimation != LED_ANIM_SPIN ? " selected" : "") + ">Solid</option>";
-  html += "<option value=\"1\"" + String(ledAnimation == LED_ANIM_SPIN ? " selected" : "") + ">Spin</option>";
-  html += "</select>";
-  html += "<p class=\"note\">Spin sweeps a bright point around the ring while a tally is active</p>";
-  html += "</div>";
+  bool reboot = bHost != deviceHostname || bIP != staticIP || bGW != gateway || bSN != subnet ||
+                bDNS != dns || bSSID != wifiSSID || bPass != wifiPassword || bMcast != tslMulticast ||
+                bDHCP != useDHCP || bWifi != wifiEnabled || bPort != tslPort;
 
-  // Ethernet/Network Settings
-  html += "<div class=\"card\"><h2>Ethernet Settings</h2>";
-  html += "<label for=\"hostname\">Hostname</label>";
-  html += "<input type=\"text\" id=\"hostname\" name=\"hostname\" value=\"" + htmlEscape(deviceHostname) + "\" maxlength=\"32\" required" + ro + ">";
-
-  html += "<label for=\"dhcp\">IP Configuration</label>";
-  html += "<select id=\"dhcp\" name=\"dhcp\" onchange=\"toggleIPFields()\">";
-  html += "<option value=\"1\"" + String(useDHCP ? " selected" : "") + ">DHCP (Automatic)</option>";
-  html += "<option value=\"0\"" + String(!useDHCP ? " selected" : "") + ">Static IP</option>";
-  html += "</select>";
-
-  html += "<div id=\"ipFields\" class=\"ip-fields\">";
-  html += "<label for=\"ip\">IP Address</label>";
-  html += "<input type=\"text\" id=\"ip\" name=\"ip\" value=\"" + htmlEscape(staticIP) + "\"" + ro + ">";
-  html += "<label for=\"gw\">Gateway</label>";
-  html += "<input type=\"text\" id=\"gw\" name=\"gw\" value=\"" + htmlEscape(gateway) + "\"" + ro + ">";
-  html += "<label for=\"sn\">Subnet Mask</label>";
-  html += "<input type=\"text\" id=\"sn\" name=\"sn\" value=\"" + htmlEscape(subnet) + "\"" + ro + ">";
-  html += "<label for=\"dns\">DNS Server</label>";
-  html += "<input type=\"text\" id=\"dns\" name=\"dns\" value=\"" + htmlEscape(dns) + "\"" + ro + ">";
-  html += "</div>";
-  html += "<p class=\"note\">Device will reboot after saving settings.</p>";
-  html += "</div>";
-
-  // WiFi Settings
-  html += "<div class=\"card\"><h2>WiFi Settings</h2>";
-  html += "<label for=\"wifiEn\">WiFi</label>";
-  html += "<select id=\"wifiEn\" name=\"wifiEn\" onchange=\"toggleWifiFields()\">";
-  html += "<option value=\"0\"" + String(!wifiEnabled ? " selected" : "") + ">Disabled</option>";
-  html += "<option value=\"1\"" + String(wifiEnabled ? " selected" : "") + ">Enabled</option>";
-  html += "</select>";
-
-  html += "<div id=\"wifiFields\" class=\"wifi-fields\">";
-  html += "<label for=\"wifiSSID\">WiFi SSID</label>";
-  html += "<input type=\"text\" id=\"wifiSSID\" name=\"wifiSSID\" value=\"" + htmlEscape(wifiSSID) + "\" maxlength=\"32\"" + ro + ">";
-  html += "<button type=\"button\" class=\"scan-btn\" id=\"wifiScanBtn\" onclick=\"wifiScan()\">Scan for Networks</button>";
-  html += "<div id=\"wifiList\" class=\"wifi-list\"></div>";
-  html += "<label for=\"wifiPass\">WiFi Password</label>";
-  // iOS Captive Network Assistant treats any form with a type=password input as a
-  // captive-portal login and auto-focuses the first text field (with keyboard).
-  // In AP mode serve a CSS-masked text input instead so the form is not a "login".
-  if (ap_mode) {
-    html += "<input type=\"text\" class=\"masked\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\" readonly>";
-  } else {
-    html += "<input type=\"password\" id=\"wifiPass\" name=\"wifiPass\" value=\"" + htmlEscape(wifiPassword) + "\" maxlength=\"64\">";
+  if (!reboot) {
+    // Live apply: redraw the current tally with the new brightness / animation and
+    // advertise the new address over mDNS
+    if (tslBrightRaw >= 0) tslBrightness = map(tslBrightRaw, 0, 3, 0, maxBrightness);
+    setTallyState(tslState, tslBrightness);
+    if (eth_connected || wifi_connected) MDNS.addServiceTxt("tally", "tcp", "tsladdr", String(tslAddress));
+    Serial.println("Settings applied without reboot");
+    server.sendHeader("Location", "/?saved=1");
+    server.send(302, "text/plain", "");
+    return;
   }
-  html += "</div>";
-  html += "<p class=\"note\">If WiFi fails, device will start an AP: " + apSSID + " (password: " + apPassword + ")</p>";
-  html += "</div>";
 
-  html += "<div style=\"display:flex;gap:10px;margin-top:20px\">";
-  html += "<button type=\"submit\" style=\"flex:2\">Save &amp; Reboot</button>";
-  html += "<button type=\"button\" style=\"flex:1;background:#c00\" onclick=\"resetDefaults()\">Reset Defaults</button>";
-  html += "</div>";
-  html += "</form>";
-  html += "<footer style=\"text-align:center;margin-top:30px;padding:20px;color:#666;font-size:12px\">";
-  html += "&copy; 2026 <a href=\"https://videowalrus.com\" style=\"color:#00d4ff\">Video Walrus</a>";
-  html += " &middot; build " __DATE__ " " __TIME__;
-  html += "</footer>";
-  html += "</div>";
+  String link = "http://" + deviceHostname + ".local/";
+  String body = "<p>Device is rebooting...</p><p>Reconnect at: <a href=\"" + htmlEscape(link) + "\">" + htmlEscape(link) + "</a></p>";
+  if (!useDHCP) body += "<p>Or: <a href=\"http://" + htmlEscape(staticIP) + "/\">http://" + htmlEscape(staticIP) + "/</a></p>";
+  server.send(200, "text/html", messagePage("Settings Saved", body, "#00d4ff"));
+  delay(1000);
+  ESP.restart();
+}
 
-  // Disco mode overlay
-  html += "<div id=\"discoOverlay\" class=\"disco-overlay\">";
-  html += "<div class=\"disco-text\">DISCO MODE<br>ACTIVATED</div>";
-  html += "<button class=\"disco-cancel\" onclick=\"stopDisco()\">STOP THE PARTY</button>";
-  html += "</div>";
-
-  // JavaScript
-  html += "<script>";
-  // Reject programmatic focus (iOS CNA auto-focus). A focus is accepted only if it
-  // follows a mousedown/keydown within 1s, or moves from another field (keyboard
-  // next/prev arrows, Tab). iOS scroll gestures emit no mousedown, so scrolling
-  // never opens the window. Accepted focus also clears the AP-mode readonly.
-  html += "var lastUser=0,lastTarget=null,roMode=" + String(ap_mode ? "true" : "false") + ";";
-  // Guard applies to text-entry fields only; selects open a picker without a mousedown
-  // on iOS and are never a CNA "username" candidate.
-  html += "function isField(t){return !!t&&/^(INPUT|TEXTAREA)$/.test(t.tagName);}";
-  html += "function isCtl(t){return !!t&&/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(t.tagName);}";
-  html += "function tapOn(t){if(!lastTarget||Date.now()-lastUser>1000)return false;";
-  html += "if(lastTarget===t)return true;var l=lastTarget.closest?lastTarget.closest('label'):null;";
-  html += "return !!l&&(l.htmlFor===t.id||l.contains(t));}";
-  html += "document.addEventListener('mousedown',function(e){lastUser=Date.now();lastTarget=e.target;";
-  html += "if(isField(e.target)&&e.target.readOnly)e.target.readOnly=false;},true);";
-  html += "document.addEventListener('keydown',function(){lastUser=Date.now();lastTarget=null;},true);";
-  html += "document.addEventListener('focusin',function(e){var t=e.target;if(!isField(t))return;";
-  html += "var ok=isCtl(e.relatedTarget)||tapOn(t)||(!lastTarget&&Date.now()-lastUser<1000);";
-  html += "if(ok){if(t.readOnly)t.readOnly=false;}else{t.blur();}});";
-  html += "document.addEventListener('focusout',function(e){var t=e.target;";
-  html += "if(roMode&&isField(t))t.readOnly=true;});";
-  // Write tally state to the DOM only when it changed (each mutation can re-trigger the
-  // iOS CNA auto-focus scan).
-  html += "function applyTally(d){var s=d.tally,c='tally-'+s.toLowerCase();var el=document.getElementById('tallyState');";
-  html += "if(el.textContent!==s)el.textContent=s;if(el.className!==c)el.className=c;if(document.body.className!==c)document.body.className=c;";
-  html += "if('text' in d){var t=d.text||'-',tt=document.getElementById('tallyText');if(tt.textContent!==t)tt.textContent=t;}}";
-  html += "function toggleIPFields(){var d=document.getElementById('dhcp').value;var f=document.getElementById('ipFields');if(d==='0'){f.classList.add('show')}else{f.classList.remove('show')}}";
-  html += "function toggleWifiFields(){var w=document.getElementById('wifiEn').value;var f=document.getElementById('wifiFields');if(w==='1'){f.classList.add('show')}else{f.classList.remove('show')}}";
-  html += "function testOn(s){fetch('/test?state='+s).then(r=>r.json()).then(applyTally).catch(e=>{})}";
-  html += "function testOff(){fetch('/test?restore=1').then(r=>r.json()).then(applyTally).catch(e=>{})}";
-  html += "var devices=[];";
-  html += "function discoverDevices(){";
-  html += "document.getElementById('deviceList').innerHTML='<p class=\"no-devices\">Scanning...</p>';";
-  html += "fetch('/discover').then(r=>r.json()).then(d=>{";
-  html += "devices=d.devices;var html='';";
-  html += "if(devices.length===0){html='<p class=\"no-devices\">No other devices found</p>';}";
-  html += "else{devices.forEach(function(dev){";
-  html += "html+='<div class=\"device-item\">';";
-  html += "html+='<div class=\"device-status off\" id=\"status-'+dev.ip.replace(/\\./g,'-')+'\"></div>';";
-  html += "html+='<div class=\"device-info\">';";
-  html += "html+='<div class=\"device-name\">'+dev.hostname+'</div>';";
-  html += "html+='<div class=\"device-details\">TSL:'+dev.tslAddress+' | '+dev.ip+'</div>';";
-  html += "html+='</div>';";
-  html += "html+='<a href=\"http://'+dev.ip+'/\" target=\"_blank\" class=\"device-link\">Open</a>';";
-  html += "html+='</div>';";
-  html += "});}";
-  html += "document.getElementById('deviceList').innerHTML=html;";
-  html += "updateDeviceStatuses();";
-  html += "}).catch(function(e){document.getElementById('deviceList').innerHTML='<p class=\"no-devices\">Scan failed</p>';});}";
-  html += "function updateDeviceStatuses(){";
-  html += "devices.forEach(function(dev){";
-  html += "fetch('http://'+dev.ip+'/status').then(r=>r.json()).then(d=>{";
-  html += "var el=document.getElementById('status-'+dev.ip.replace(/\\./g,'-'));";
-  html += "var c='device-status '+d.tally.toLowerCase();if(el&&el.className!==c){el.className=c;}";
-  html += "}).catch(function(){});});}";
-  html += "function bulkTest(state){";
-  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/test?state='+state).catch(function(){});});";
-  html += "fetch('/test?state='+state);}";
-  // WiFi scan: /api/wifi-scan?start=1 kicks off an async scan; poll without the
-  // param until scanning is false. Results sorted strongest first, one row per SSID.
-  html += "var wifiTimer=null;";
-  html += "function escHtml(s){return String(s).replace(/[&<>\"']/g,function(c){return '&#'+c.charCodeAt(0)+';'});}";
-  html += "function wifiScan(start){var l=document.getElementById('wifiList'),b=document.getElementById('wifiScanBtn');";
-  html += "if(start!==false){start=true;clearTimeout(wifiTimer);l.classList.add('show');l.innerHTML='<p class=\"no-devices\">Scanning...</p>';b.disabled=true;b.textContent='Scanning...';}";
-  html += "fetch('/api/wifi-scan'+(start?'?start=1':'')).then(r=>r.json()).then(d=>{";
-  html += "if(d.scanning){wifiTimer=setTimeout(function(){wifiScan(false)},750);return;}";
-  html += "b.disabled=false;b.textContent='Scan for Networks';";
-  html += "if(!d.networks){l.innerHTML='<p class=\"no-devices\">Scan failed</p>';return;}";
-  html += "var seen={},h='';d.networks.sort(function(a,c){return c.rssi-a.rssi}).forEach(function(w){";
-  html += "if(!w.ssid||seen[w.ssid])return;seen[w.ssid]=1;var q=w.rssi>=-55?4:w.rssi>=-65?3:w.rssi>=-75?2:1;";
-  html += "h+='<div class=\"wifi-item\" onclick=\"pickWifi(this)\" data-ssid=\"'+escHtml(w.ssid)+'\"><span class=\"wifi-name\">'+escHtml(w.ssid)+'</span>'";
-  html += "+'<span class=\"wifi-meta\">'+(w.enc?'&#128274; ':'')+'&#9679;'.repeat(q)+'&#9675;'.repeat(4-q)+'</span></div>';});";
-  html += "l.innerHTML=h||'<p class=\"no-devices\">No networks found</p>';";
-  html += "}).catch(function(){b.disabled=false;b.textContent='Scan for Networks';l.innerHTML='<p class=\"no-devices\">Scan failed</p>';});}";
-  html += "function pickWifi(el){document.getElementById('wifiSSID').value=el.getAttribute('data-ssid');document.getElementById('wifiList').classList.remove('show');}";
-  html += "function resetDefaults(){if(confirm('Reset all settings to factory defaults?\\n\\nThis will erase all configuration and reboot the device.')){window.location.href='/reset';}}";
-  // Firmware update functions
-  html += "function checkUpdate(){";
-  html += "document.getElementById('updateNotice').style.display='none';";
-  html += "fetch('/api/check-update').then(r=>r.json()).then(d=>{";
-  html += "document.getElementById('fwVersion').textContent=d.current;";
-  html += "if(d.updateAvailable){";
-  html += "document.getElementById('updateNotice').style.display='block';";
-  html += "document.getElementById('latestVersion').textContent=d.latest;";
-  html += "}else{alert('Firmware is up to date ('+d.current+')');}";
-  html += "}).catch(function(e){alert('Failed to check for updates');});}";
-  html += "function installUpdate(){";
-  html += "if(confirm('Install firmware update?\\n\\nThe device will download the new firmware and reboot.')){";
-  html += "document.getElementById('updateNotice').innerHTML='<span style=\\\"color:#ff6b6b\\\">Updating... Please wait, device will reboot</span>';";
-  html += "fetch('/api/update').catch(function(){});}}";
-  // Secret disco mode - type 'disco' anywhere to trigger
-  html += "var discoBuffer='';var discoTimer=null;";
-  html += "document.addEventListener('keydown',function(e){";
-  html += "discoBuffer+=e.key.toLowerCase();discoBuffer=discoBuffer.slice(-5);";
-  html += "if(discoBuffer==='disco'){startDisco();}});";
-  html += "function startDisco(){";
-  html += "document.getElementById('discoOverlay').classList.add('active');";  // Show overlay
-  html += "fetch('/disco?duration=30');";  // Trigger local device immediately
-  // If devices already discovered, use them; otherwise scan first
-  html += "if(devices.length>0){";
-  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=30').catch(function(){});});";
-  html += "}else{";
-  html += "fetch('/discover').then(r=>r.json()).then(d=>{";
-  html += "devices=d.devices;";
-  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco?duration=30').catch(function(){});});";
-  html += "}).catch(function(){});}";
-  html += "discoTimer=setTimeout(function(){document.getElementById('discoOverlay').classList.remove('active');},30000);";  // Auto-hide after 30s
-  html += "console.log('DISCO MODE!');}";
-  html += "function stopDisco(){";
-  html += "if(discoTimer){clearTimeout(discoTimer);}";
-  html += "document.getElementById('discoOverlay').classList.remove('active');";  // Hide overlay
-  html += "fetch('/disco-stop');";  // Stop local device
-  html += "devices.forEach(function(dev){fetch('http://'+dev.ip+'/disco-stop').catch(function(){});});";  // Stop all discovered devices
-  html += "}";
-  html += "toggleIPFields();toggleWifiFields();";
-  html += "discoverDevices();";  // Auto-discover devices on page load
-  html += "function updateStatus(){fetch('/status').then(r=>r.json()).then(applyTally).catch(e=>{});}";
-  html += "updateStatus();";
-  html += "setInterval(updateStatus,2000);";
-  html += "setInterval(updateDeviceStatuses,5000);";
-  html += "</script></body></html>";
-
-  return html;
+// Scan for WiFi networks. ?start=1 begins a new async scan (unless one is already
+// running); a call without it returns the last result. Enables the STA interface as
+// a side effect (AP mode becomes AP+STA, Ethernet-only gains an idle STA); the AP
+// stays up, but beacons pause briefly while the radio hops channels.
+static void handleWifiScan() {
+  int16_t n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_FAILED || (server.hasArg("start") && n != WIFI_SCAN_RUNNING)) {
+    WiFi.scanDelete();
+    n = WiFi.scanNetworks(true);  // async
+  }
+  if (n == WIFI_SCAN_RUNNING) {
+    sendJson("{\"scanning\":true}");
+    return;
+  }
+  if (n < 0) {
+    sendJson("{\"scanning\":false,\"error\":\"scan failed\"}");
+    return;
+  }
+  String json = "{\"scanning\":false,\"networks\":[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    json += "{\"ssid\":" + q(WiFi.SSID(i)) + ",";
+    json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+    json += "\"ch\":" + String(WiFi.channel(i)) + ",";
+    json += "\"enc\":" + b(WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    json += "}";
+  }
+  json += "]}";
+  sendJson(json);
 }
 
 // Setup web server routes
 void setupWebServer() {
-  // Main configuration page
   server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", getConfigPage());
+    server.send_P(200, "text/html", PAGE_HTML);
   });
 
-  // Status endpoint (JSON) - with CORS for cross-device polling
-  server.on("/status", HTTP_GET, []() {
-    String json = "{\"tally\":\"" + currentTallyState + "\",\"text\":\"" + jsonEscape(currentTallyText) + "\",\"ip\":\"" + getActiveIP() + "\",\"connection\":\"" + getConnectionStatus() + "\"}";
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", json);
-  });
+  server.on("/status", HTTP_GET, []() { sendJson(statusJson(), true); });
+  server.on("/api/config", HTTP_GET, []() { sendJson(configJson()); });
 
   // Test tally endpoint - with CORS for cross-device control
   server.on("/test", HTTP_GET, []() {
     if (server.hasArg("restore")) {
       setTallyState(tslState, tslBrightness);  // back to what the switcher last sent
     } else if (server.hasArg("state")) {
-      int state = server.arg("state").toInt();
-      setTallyState(state);
+      setTallyState(server.arg("state").toInt());
     }
-    String json = "{\"tally\":\"" + currentTallyState + "\"}";
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", json);
+    sendJson("{\"tally\":" + q(currentTallyState) + ",\"text\":" + q(currentTallyText) + "}", true);
   });
 
   // Device info endpoint (for multi-device discovery) - with CORS
   server.on("/info", HTTP_GET, []() {
-    String mac = eth_connected ? ETH.macAddress() : WiFi.macAddress();
     String json = "{";
-    json += "\"hostname\":\"" + jsonEscape(deviceHostname) + "\",";
-    json += "\"ip\":\"" + getActiveIP() + "\",";
-    json += "\"mac\":\"" + mac + "\",";
+    json += "\"hostname\":" + q(deviceHostname) + ",";
+    json += "\"ip\":" + q(getActiveIP()) + ",";
+    json += "\"mac\":" + q(activeMac()) + ",";
     json += "\"tslAddress\":" + String(tslAddress) + ",";
-    json += "\"tallyState\":\"" + currentTallyState + "\",";
-    json += "\"tallyText\":\"" + jsonEscape(currentTallyText) + "\",";
-    json += "\"connection\":\"" + getConnectionStatus() + "\",";
-    json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
+    json += "\"tallyState\":" + q(currentTallyState) + ",";
+    json += "\"tallyText\":" + q(currentTallyText) + ",";
+    json += "\"connection\":" + q(getConnectionStatus()) + ",";
+    json += "\"firmware\":" + q(FIRMWARE_VERSION) + ",";
     json += "\"build\":\"" __DATE__ " " __TIME__ "\"";
     json += "}";
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", json);
+    sendJson(json, true);
   });
 
   // Discover other tally devices on the network
@@ -1325,90 +1173,52 @@ void setupWebServer() {
     if (millis() - lastDiscoveryScan > 10000) {
       discoverTallyDevices();
     }
-
-    // Build JSON array of discovered devices
     String json = "{\"devices\":[";
     for (int i = 0; i < numDiscoveredDevices; i++) {
       if (i > 0) json += ",";
-      json += "{";
-      json += "\"hostname\":\"" + jsonEscape(discoveredDevices[i].hostname) + "\",";
-      json += "\"ip\":\"" + jsonEscape(discoveredDevices[i].ip) + "\",";
-      json += "\"tslAddress\":" + String(discoveredDevices[i].tslAddress);
-      json += "}";
+      json += "{\"hostname\":" + q(discoveredDevices[i].hostname) + ",";
+      json += "\"ip\":" + q(discoveredDevices[i].ip) + ",";
+      json += "\"tslAddress\":" + String(discoveredDevices[i].tslAddress) + "}";
     }
     json += "],\"count\":" + String(numDiscoveredDevices) + "}";
-    server.send(200, "application/json", json);
+    sendJson(json);
   });
 
-  // Scan for WiFi networks. ?start=1 begins a new async scan (unless one is already
-  // running); a call without it returns the last result. Enables the STA interface as
-  // a side effect (AP mode becomes AP+STA, Ethernet-only gains an idle STA); the AP
-  // stays up, but beacons pause briefly while the radio hops channels.
-  server.on("/api/wifi-scan", HTTP_GET, []() {
-    int16_t n = WiFi.scanComplete();
-    if (n == WIFI_SCAN_FAILED || (server.hasArg("start") && n != WIFI_SCAN_RUNNING)) {
-      WiFi.scanDelete();
-      n = WiFi.scanNetworks(true);  // async
-    }
-    if (n == WIFI_SCAN_RUNNING) {
-      server.send(200, "application/json", "{\"scanning\":true}");
-      return;
-    }
-    if (n < 0) {
-      server.send(200, "application/json", "{\"scanning\":false,\"error\":\"scan failed\"}");
-      return;
-    }
-    String json = "{\"scanning\":false,\"networks\":[";
-    for (int i = 0; i < n; i++) {
-      if (i > 0) json += ",";
-      json += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\",";
-      json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
-      json += "\"ch\":" + String(WiFi.channel(i)) + ",";
-      json += "\"enc\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true");
-      json += "}";
-    }
-    json += "]}";
-    server.send(200, "application/json", json);
-  });
+  server.on("/api/wifi-scan", HTTP_GET, handleWifiScan);
+  server.on("/save", HTTP_POST, handleSave);
 
   // Reset to factory defaults
   server.on("/reset", HTTP_GET, []() {
     resetSettings();
-
-    String response = "<!DOCTYPE html><html><head>";
-    response += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
-    response += "<title>Factory Reset</title>";
-    response += "<style>body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.message{text-align:center}h1{color:#c00}</style>";
-    response += "</head><body><div class=\"message\"><h1>Factory Reset Complete</h1>";
-    response += "<p>All settings have been reset to defaults.</p>";
-    response += "<p>Device is rebooting...</p>";
-    response += "</div></body></html>";
-
-    server.send(200, "text/html", response);
-
+    server.send(200, "text/html", messagePage("Factory Reset Complete",
+                "<p>All settings have been reset to defaults.</p><p>Device is rebooting...</p>", "#c00"));
     delay(1000);
     ESP.restart();
   });
 
-  // Check for firmware updates
+  // Check the release manifest for a newer firmware
   server.on("/api/check-update", HTTP_GET, []() {
-    checkForUpdates();
-    String json = "{\"current\":\"" + String(FIRMWARE_VERSION) + "\",";
-    json += "\"latest\":\"" + jsonEscape(latestVersion) + "\",";
-    json += "\"updateAvailable\":" + String(updateAvailable ? "true" : "false") + ",";
-    json += "\"firmwareURL\":\"" + jsonEscape(firmwareURL) + "\"}";
-    server.send(200, "application/json", json);
+    otaCheck();
+    String json = "{\"current\":" + q(FIRMWARE_VERSION) + ",";
+    json += "\"latest\":" + q(latestVersion) + ",";
+    json += "\"updateAvailable\":" + b(updateAvailable) + ",";
+    json += "\"firmwareURL\":" + q(firmwareURL) + ",";
+    json += "\"date\":" + q(releaseDate) + ",";
+    json += "\"notes\":[";
+    for (int i = 0; i < otaNoteCount; i++) { if (i) json += ","; json += q(otaNotes[i]); }
+    json += "]}";
+    sendJson(json);
   });
 
-  // Perform firmware update from GitHub
+  // Download and install the firmware from the manifest
   server.on("/api/update", HTTP_GET, []() {
     if (!updateAvailable || firmwareURL.length() == 0) {
       server.send(400, "application/json", "{\"error\":\"No update available\"}");
       return;
     }
-    server.send(200, "application/json", "{\"status\":\"starting\",\"message\":\"Downloading update...\"}");
+    sendJson("{\"status\":\"starting\",\"message\":\"Downloading update...\"}");
     delay(100);  // Give time for response to send
-    performOTAUpdate();
+    otaInstall();
   });
 
   // Secret disco mode endpoint - with CORS for cross-device sync
@@ -1420,127 +1230,28 @@ void setupWebServer() {
     discoMode = true;
     discoEndTime = millis() + (duration * 1000);
     Serial.printf("[DISCO] Party mode activated for %d seconds!\n", duration);
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", "{\"disco\":true,\"duration\":" + String(duration) + "}");
+    sendJson("{\"disco\":true,\"duration\":" + String(duration) + "}", true);
   });
 
   // Stop disco mode - with CORS for cross-device sync
   server.on("/disco-stop", HTTP_GET, []() {
     discoMode = false;
     Serial.println("[DISCO] Party stopped by request!");
-    // Return to current tally state
-    setTallyState(currentTallyState == "Green" ? 1 :
-                  currentTallyState == "Red" ? 2 :
-                  currentTallyState == "Yellow" ? 3 : 0);
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", "{\"disco\":false}");
+    setTallyState(tslState, tslBrightness);  // back to what the switcher last sent
+    sendJson("{\"disco\":false}", true);
   });
 
-  // Save settings
-  server.on("/save", HTTP_POST, []() {
-    if (server.hasArg("tslAddr")) {
-      tslAddress = server.arg("tslAddr").toInt();
-    }
-    if (server.hasArg("tslMcast")) {
-      tslMulticast = server.arg("tslMcast");
-    }
-    if (server.hasArg("tslPort")) {
-      tslPort = constrain(server.arg("tslPort").toInt(), 1, 65535);
-    }
-    if (server.hasArg("maxBright")) {
-      maxBrightness = constrain(server.arg("maxBright").toInt(), 1, 255);
-    }
-    if (server.hasArg("ledAnim")) {
-      ledAnimation = server.arg("ledAnim") == "1" ? LED_ANIM_SPIN : LED_ANIM_SOLID;
-    }
-    if (server.hasArg("hostname")) {
-      deviceHostname = server.arg("hostname");
-    }
-    if (server.hasArg("dhcp")) {
-      useDHCP = server.arg("dhcp") == "1";
-    }
-    if (server.hasArg("ip")) {
-      staticIP = server.arg("ip");
-    }
-    if (server.hasArg("gw")) {
-      gateway = server.arg("gw");
-    }
-    if (server.hasArg("sn")) {
-      subnet = server.arg("sn");
-    }
-    if (server.hasArg("dns")) {
-      dns = server.arg("dns");
-    }
-
-    // WiFi settings
-    if (server.hasArg("wifiEn")) {
-      wifiEnabled = server.arg("wifiEn") == "1";
-    }
-    if (server.hasArg("wifiSSID")) {
-      wifiSSID = server.arg("wifiSSID");
-    }
-    if (server.hasArg("wifiPass")) {
-      wifiPassword = server.arg("wifiPass");
-    }
-
-    saveSettings();
-
-    // Build the new address link
-    String newAddress = "http://" + deviceHostname + ".local/";
-    String ipAddress = useDHCP ? "(DHCP - check router)" : staticIP;
-
-    String response = "<!DOCTYPE html><html><head>";
-    response += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
-    response += "<title>Settings Saved</title>";
-    response += "<style>body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.message{text-align:center}h1{color:#00d4ff}a{color:#00d4ff}</style>";
-    response += "</head><body><div class=\"message\"><h1>Settings Saved!</h1>";
-    response += "<p>Device is rebooting...</p>";
-    response += "<p>Reconnect at: <a href=\"" + htmlEscape(newAddress) + "\">" + htmlEscape(newAddress) + "</a></p>";
-    if (!useDHCP) {
-      response += "<p>Or: <a href=\"http://" + htmlEscape(staticIP) + "/\">http://" + htmlEscape(staticIP) + "/</a></p>";
-    }
-    response += "</div></body></html>";
-
-    server.send(200, "text/html", response);
-
-    // Reboot after a short delay to allow response to be sent
-    delay(1000);
-    ESP.restart();
-  });
-
-  // Captive portal detection endpoints - respond with redirect to trigger popup
-  // Android
-  server.on("/generate_204", HTTP_GET, []() {
-    server.sendHeader("Location", "http://" + getActiveIP() + "/");
-    server.send(302, "text/plain", "");
-  });
-  // Windows
-  server.on("/ncsi.txt", HTTP_GET, []() {
-    server.sendHeader("Location", "http://" + getActiveIP() + "/");
-    server.send(302, "text/plain", "");
-  });
-  server.on("/connecttest.txt", HTTP_GET, []() {
-    server.sendHeader("Location", "http://" + getActiveIP() + "/");
-    server.send(302, "text/plain", "");
-  });
-  // Apple
-  server.on("/hotspot-detect.html", HTTP_GET, []() {
-    server.sendHeader("Location", "http://" + getActiveIP() + "/");
-    server.send(302, "text/plain", "");
-  });
-  server.on("/library/test/success.html", HTTP_GET, []() {
-    server.sendHeader("Location", "http://" + getActiveIP() + "/");
-    server.send(302, "text/plain", "");
-  });
+  // Captive portal probes - redirect to the config page to trigger the popup
+  server.on("/generate_204", HTTP_GET, redirectHome);              // Android
+  server.on("/ncsi.txt", HTTP_GET, redirectHome);                  // Windows
+  server.on("/connecttest.txt", HTTP_GET, redirectHome);
+  server.on("/hotspot-detect.html", HTTP_GET, redirectHome);       // Apple
+  server.on("/library/test/success.html", HTTP_GET, redirectHome);
 
   // Catch-all handler for captive portal (redirect unknown requests to config page)
   server.onNotFound([]() {
-    if (ap_mode) {
-      server.sendHeader("Location", "http://" + getActiveIP() + "/");
-      server.send(302, "text/plain", "");
-    } else {
-      server.send(404, "text/plain", "Not found");
-    }
+    if (ap_mode) redirectHome();
+    else server.send(404, "text/plain", "Not found");
   });
 }
 
@@ -1710,10 +1421,7 @@ void loop() {
       // Disco time is over
       discoMode = false;
       Serial.println("[DISCO] Party's over!");
-      // Return to current tally state
-      setTallyState(currentTallyState == "Green" ? 1 :
-                    currentTallyState == "Red" ? 2 :
-                    currentTallyState == "Yellow" ? 3 : 0);
+      setTallyState(tslState, tslBrightness);  // back to what the switcher last sent
     }
   }
 
