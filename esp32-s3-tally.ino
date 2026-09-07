@@ -246,8 +246,8 @@ String getConfigPage() {
   html += "h1{color:#00d4ff;text-align:center}";
   html += ".card{background:#16213e;padding:20px;border-radius:10px;margin-bottom:20px}";
   html += ".card h2{margin-top:0;color:#00d4ff;border-bottom:1px solid #0f3460;padding-bottom:10px}";
-  html += "label{display:block;margin:10px 0 5px;font-weight:bold}";
-  html += "input[type=text],input[type=number],select{width:100%;padding:10px;border:1px solid #0f3460;border-radius:5px;background:#0f3460;color:#eee;box-sizing:border-box}";
+  html += "label{display:block;width:fit-content;margin:10px 0 5px;font-weight:bold}";
+  html += "input[type=text],input[type=number],select{width:100%;padding:10px;border:1px solid #0f3460;border-radius:5px;background:#0f3460;color:#eee;box-sizing:border-box;font-size:16px}";
   html += "input:focus,select:focus{outline:none;border-color:#00d4ff}";
   html += ".ip-fields{display:none}.ip-fields.show{display:block}";
   html += "button{width:100%;padding:15px;background:#00d4ff;color:#1a1a2e;border:none;border-radius:5px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:20px}";

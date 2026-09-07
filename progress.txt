@@ -1,0 +1,226 @@
+# ESP32-S3 TSL Tally Light - Progress Tracker
+
+Last Updated: 2026-01-13
+Current Version: 1.1.0
+
+## Completed Features
+
+### Core Functionality
+- [x] TSL 3.1 protocol parsing (address, tally state, brightness, text label)
+- [x] TSL 5.0 UMD protocol support (auto-detected)
+- [x] UDP multicast listener on configurable address/port
+- [x] Dual-core architecture (Core 0: UDP, Core 1: Web/OTA)
+- [x] WS2812B LED control via FastLED (7 LEDs)
+- [x] Tally states: Off, Green, Red, Yellow, Blue, Magenta, Cyan
+
+### Network
+- [x] W5500 SPI Ethernet support
+- [x] WiFi client mode
+- [x] Access Point fallback mode
+- [x] Network priority: Ethernet > WiFi > AP
+- [x] DHCP and Static IP support
+- [x] Unique device hostname (Tally-XXYYZZ from MAC)
+
+### Web Interface
+- [x] Responsive configuration page
+- [x] Live status display (tally state, text, IP, connection)
+- [x] TSL settings (address, multicast, port, brightness)
+- [x] WiFi settings (enable, SSID, password)
+- [x] Ethernet settings (hostname, DHCP/static)
+- [x] Test buttons (momentary Green, Red, Yellow)
+- [x] Dynamic background color based on tally state
+- [x] Auto-refresh status polling (1 second interval)
+- [x] Static PROGMEM page filled from /api/config and /status
+- [x] Operation / Configuration / System tabs, Auto/Light/Dark theme, header with hostname/IP/connection
+- [x] Live-apply Save with toast; reboot only for network, hostname, multicast or port
+- [x] Hostname and IP validation on save
+- [x] Update popup with release notes, install progress poll, What's New popup once per browser
+- [x] TSL packet counter, sender and age on the status card
+
+### Multi-Device Support
+- [x] mDNS service registration (_tally._tcp)
+- [x] mDNS device discovery
+- [x] Network devices list in web UI
+- [x] Auto-discovery on page load
+- [x] Periodic background discovery (60 seconds)
+- [x] Bulk control (All Green, All Red, All Off)
+- [x] Cross-device status polling
+- [x] CORS headers for cross-origin requests
+
+### OTA Updates
+- [x] ArduinoOTA support (port 3232, password: password)
+- [x] Release manifest on S3 (version, URL, MD5, date, notes); GitHub releases kept as the bridge for <=1.0.12
+- [x] Version comparison logic
+- [x] One-click firmware download and install
+- [x] Update progress LED indication (purple)
+
+### Persistence & Reset
+- [x] NVS settings storage
+- [x] Factory reset via BOOT button (3 second hold)
+- [x] Factory reset via web interface
+- [x] Settings restore after reboot
+
+### Captive Portal
+- [x] DNS server for AP mode
+- [x] Android captive portal detection (/generate_204)
+- [x] Windows detection (/ncsi.txt, /connecttest.txt)
+- [x] Apple detection (/hotspot-detect.html)
+- [x] Auto-redirect to config page
+
+### LED Indicators
+- [x] Orange spin while waiting for Ethernet
+- [x] Spin animation (dim ring + bright head/tail) during Ethernet/WiFi/AP boot stages
+- [x] LED Animation setting: Solid or Spin for active tally (NVS, web UI)
+- [x] Cyan spin then dim cyan for AP mode
+- [x] Red blink during factory reset
+- [x] Blue flash on reset complete
+- [x] Color cycle on network connect (all tally colors)
+
+### Easter Eggs
+- [x] Disco mode (type "disco" anywhere)
+- [x] Synchronized across all discovered devices
+- [x] Rainbow color cycling
+- [x] Configurable duration
+- [x] Stop button overlay
+
+## Version History
+
+### v1.1.0 (Current)
+- Rewrite tally logic for both TSL 3.1 and 5.0:
+  - T1 = Green, T2 = Red, T3 = Blue, T4 = Magenta
+  - T1 & T2 = Yellow, T3 & T4 = Cyan
+  - Combinations of (T1 or T2) AND (T3 or T4) = Split mode (4 LEDs + 3 LEDs)
+- Fix tally bit 4 not triggering
+- Fix setTallyState case values (8→5, 12→6)
+- Add setTallySplit() function for split LED mode
+- Add applyTallyBits() helper for unified tally logic
+
+### v1.0.9
+- Remove unused variables (redTally, redLED, greenTally, greenLED)
+- Remove unused define (GITHUB_REPO)
+- Fix magic number: use BUFFER_LENGTH constant in UDP task buffer
+- Fix variable shadowing: rename local dnsServer to dnsIP to avoid shadowing global DNSServer
+- Fix ArduinoOTA.handle() called unconditionally in loop (now guarded by ota_enabled flag)
+- Fix static IP configuration timing: ETH.config() now called after ETH.begin()
+- Fix copyright year inconsistency (2025 → 2026 in Serial output)
+- Fix division by zero in OTA progress callback when total < 100 bytes
+- Fix JSON parsing: add bounds checks for indexOf() returning -1 in GitHub API parsing
+- Add server-side validation for tslAddress (constrain 0-126)
+- Add server-side validation for test endpoint state parameter (constrain 0-6)
+- Fix millis() overflow bug in disco mode timing (use elapsed time comparison)
+
+### v1.0.8
+- Add TSL 5.0 UMD protocol support (auto-detected)
+- Add Blue, Magenta, Cyan tally colors (states 4, 5, 6)
+- Add test buttons for new colors in web interface
+- Add bulk control buttons for all 7 colors
+- Fix device name text color not staying white when tally changes
+- Update startup LED sequence to show all colors
+- Fix tally color mapping: T3→Blue, T4→Magenta, T3+T4→Cyan
+
+### v1.0.7
+- Copyright update to 2026
+
+### v1.0.6
+- Change Ethernet wait LED to pulsing orange
+
+### v1.0.5
+- Add dynamic background color based on tally state
+- Fix TSL text parsing
+- Add auto-refresh status polling
+
+### v1.0.4
+- Add CORS headers
+- Fix discovery duplicates
+- Extend disco mode
+
+### v1.0.3
+- Fix Check button styling
+- Update flow improvements
+
+### v1.0.2
+- Fix HTTPS for GitHub OTA updates
+
+### v1.0.1
+- Add GitHub OTA updates
+- Add auto-discovery
+- Add release tooling
+
+### v1.0.0
+- Initial release
+- W5500 Ethernet support
+- Multi-device discovery
+- Captive portal
+- Unique device IDs
+
+## Known Issues / Bugs
+
+### Critical
+(Core functionality broken)
+
+### High
+(Significant bug affecting user experience)
+
+### Medium
+(Annoying but workaroundable)
+- [x] new colors should be T3 blue, T4 Magenta
+        Fixed: T3→Blue, T4→Magenta, T3+T4→Cyan
+- [x] T4 doesnt seem to be received.
+
+### Low
+(Minor cosmetic or edge case issues)
+- [x] When the tally color changes the text title of the other discovered lights also changes color.
+        Fixed: Added explicit color:#fff to .device-name CSS class.
+
+## Future Enhancements (Backlog)
+
+### High Priority
+- [ ] Authentication for web interface
+- [ ] HTTPS support (self-signed cert)
+- [ ] Multiple TSL address monitoring
+
+### Medium Priority
+- [ ] Custom tally colors
+- [ ] Battery/low-power mode
+- [ ] PoE support
+- [x] TSL 5.0 protocol
+- [x] Three more colors (Blue,Magenta and Cyan) Mapped to Tallie 3 and 4
+
+### Low Priority
+- [ ] DMX output
+- [ ] REST webhooks
+- [ ] MQTT integration
+- [ ] Home Assistant integration
+
+## Build & Deploy
+
+### Build
+```bash
+pio run
+```
+
+### Upload via USB
+```bash
+pio run -t upload
+```
+
+### Upload via OTA
+```bash
+TALLY_IP=192.168.1.100 pio run -t upload -e ota
+```
+
+### Bulk OTA Update
+```bash
+./ota-update-all.sh 192.168.1.100
+```
+
+### Create Release
+```bash
+./release.sh 1.0.8
+```
+
+## Documentation
+
+- README.md - Full documentation
+- QUICKSTART.md - Getting started guide
+- PRD.md - Product requirements document
