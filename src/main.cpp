@@ -15,7 +15,7 @@
 #define RESET_BUTTON_PIN 0  // GPIO 0 (BOOT button) for factory reset
 #define WIFI_CONNECT_TIMEOUT 10000  // 10 seconds to connect to WiFi
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.2.0"
 #endif
 #define MAX_DISCOVERED_DEVICES 16
 
