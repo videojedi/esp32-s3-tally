@@ -17,7 +17,25 @@
       "Bash(python3:*)",
       "Bash(TALLY_IP=192.168.9.183 /Users/richard/Library/Python/3.10/bin/pio run:*)",
       "Bash(./release.sh:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(./ota-update-all.sh:*)",
+      "Bash(TALLY_IP=192.168.9.180 /Users/richard/Library/Python/3.10/bin/pio run:*)",
+      "Bash(for i in 1 2 3)",
+      "Bash(do echo \"Request $i:\")",
+      "Bash(done)",
+      "Bash(xxd:*)",
+      "Bash(git tag:*)",
+      "Bash(gh release create:*)",
+      "Bash(pio run:*)",
+      "Bash(~/.platformio/penv/bin/pio run:*)",
+      "Skill(ralph-loop:ralph-loop)",
+      "Bash(pio pkg:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(git checkout:*)",
+      "Bash(gh release upload:*)"
     ]
+  },
+  "enabledPlugins": {
+    "ralph-loop@claude-plugins-official": true
   }
 }
