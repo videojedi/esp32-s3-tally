@@ -8,7 +8,8 @@ Current Version: 1.1.0
 ### Core Functionality
 - [x] TSL 3.1 protocol parsing (address, tally state, brightness, text label)
 - [x] TSL 5.0 UMD protocol support (auto-detected)
-- [x] UDP multicast listener on configurable address/port
+- [x] UDP multicast listener on configurable address/port (drains the queue each pass, no per-packet logging, redraws on change only; unicast accepted too)
+- [x] WiFi modem sleep disabled for receive latency
 - [x] Dual-core architecture (Core 0: UDP, Core 1: Web/OTA)
 - [x] WS2812B LED control via FastLED (7 LEDs)
 - [x] Tally states: Off, Green, Red, Yellow, Blue, Magenta, Cyan

@@ -70,7 +70,7 @@ void resetSettings();
 void buttonTick();
 void onEvent(arduino_event_id_t event);
 void setupWebServer();
-bool udpTSL(char *data);
+bool udpTSL(const char *data, int len);
 void setTallyState(int state, int brightness = -1);  // brightness < 0 = maxBrightness
 void renderSpinFrame(CRGB colour, uint8_t brightness);
 void spinDelay(CRGB colour, unsigned long ms);
@@ -548,6 +548,7 @@ bool setupWiFi() {
 
   WiFi.setHostname(deviceHostname.c_str());
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  // modem sleep adds tens of ms to every received packet
   delay(100);
   yield();
 
@@ -666,42 +667,40 @@ void setTallyState(int state, int brightness) {
   ledUnlock();
 }
 
-bool udpTSL(char *data) {
-  char* message;
-  int T;
-  int Bright;
-  int addr;
-  String text;
-  message = data;
+// Parse one TSL 3.1 frame. Returns true if it was for this address. Only the address
+// byte is looked at for other addresses, and the LEDs are only redrawn when the state,
+// brightness or text actually changed, so a switcher repeating every address several
+// times a second costs almost nothing.
+bool udpTSL(const char *data, int len) {
+  if (len < 2) return false;
+  int addr = (uint8_t)data[0] - 128;
+  if (addr != tslAddress) return false;
 
-  addr = message[0] - 128;
+  // Control byte bits: 0 = tally 1, 1 = tally 2, 2 = tally 3, 3 = tally 4, 4-5 = brightness.
+  // Only tally 1/2 drive the light.
+  int T = data[1] & 0b00000011;
+  int raw = (data[1] & 0b00110000) >> 4;
+  int bright = map(raw, 0, 3, 0, maxBrightness);
 
-  if (tslAddress == addr) {
-    // Control byte bits: 0 = tally 1, 1 = tally 2, 2 = tally 3, 3 = tally 4, 4-5 = brightness.
-    // Only tally 1/2 drive the light; masking to 4 bits let tally 3/4 push T out of
-    // range (4-15), which setTallyState() treats as Off.
-    T = message[1] & 0b00000011;
-
-    for (int j = 2; j < 18; j++) {
-      char c = message[j];
-      if (c == '\0') break;  // Stop at null terminator
-      if (c >= 32 && c < 127) text += c;  // Only printable ASCII
-    }
-    text.trim();  // Remove trailing spaces
-    currentTallyText = text;
-    Serial.printf("Text: %s\n", text.c_str());
-
-    Bright = (message[1] & 0b00110000) >> 4;
-    tslBrightRaw = Bright;
-    Bright = map(Bright, 0, 3, 0, maxBrightness);
-    Serial.printf("Brightness: %d\n", Bright);
-
-    tslState = T;
-    tslBrightness = Bright;
-    setTallyState(T, Bright);  // setTallyState applies brightness before show()
-    return true;
+  // 16-character label, printable ASCII only, surrounding spaces dropped
+  char text[17];
+  int n = 0;
+  for (int j = 2; j < 18 && j < len; j++) {
+    char c = data[j];
+    if (c == '\0') break;
+    if (c == ' ' && n == 0) continue;      // leading padding
+    if (c >= 32 && c < 127) text[n++] = c;
   }
-  return false;
+  while (n > 0 && text[n - 1] == ' ') n--;  // trailing padding
+  text[n] = '\0';
+
+  bool changed = (T != tslState) || (bright != tslBrightness);
+  tslState = T;
+  tslBrightRaw = raw;
+  tslBrightness = bright;
+  if (currentTallyText != text) currentTallyText = text;
+  if (changed) setTallyState(T, bright);  // setTallyState applies brightness before show()
+  return true;
 }
 
 // Start UDP multicast listener
@@ -727,34 +726,40 @@ void stopUDP() {
   }
 }
 
-// UDP listener task - runs on core 0 for reliable multicast reception
+// UDP listener task - runs on core 0 for reliable multicast reception. Drains every
+// queued packet each pass so a burst for many addresses cannot build a backlog, and
+// logs a summary every 10 s instead of a line per packet.
 void udpListenerTask(void *pvParameters) {
   Serial.printf("[UDP Task] Running on core %d\n", xPortGetCoreID());
 
   char buffer[256];
+  uint32_t seen = 0, lastSeen = 0, mine = 0, lastMine = 0;
+  unsigned long lastReport = millis();
 
   for (;;) {
-    if (udpRunning) {
-      int packetSize = udp.parsePacket();
-      if (packetSize) {
-        IPAddress remote = udp.remoteIP();
-        uint16_t port = udp.remotePort();
-
-        int len = udp.read(buffer, sizeof(buffer) - 1);
-        if (len > 0) {
-          buffer[len] = '\0';
-          Serial.printf("[UDP] From %s:%d, Length: %d\n",
-                        remote.toString().c_str(), port, len);
-          if (udpTSL(buffer)) {
-            tslPackets++;
-            tslLastMs = millis();
-            tslLastFrom = (uint32_t)remote;
-          }
-        }
+    int drained = 0;
+    while (udpRunning && drained < 64 && udp.parsePacket() > 0) {
+      int len = udp.read(buffer, sizeof(buffer) - 1);
+      drained++;
+      if (len <= 0) continue;
+      seen++;
+      if (udpTSL(buffer, len)) {
+        mine++;
+        tslPackets++;
+        tslLastMs = millis();
+        tslLastFrom = (uint32_t)udp.remoteIP();
       }
     }
-    // Small delay to yield CPU time
-    vTaskDelay(pdMS_TO_TICKS(5));
+    if (millis() - lastReport >= 10000) {
+      if (seen != lastSeen) {
+        Serial.printf("[UDP] %lu packets in 10 s, %lu for address %d\n",
+                      (unsigned long)(seen - lastSeen), (unsigned long)(mine - lastMine), tslAddress);
+        lastSeen = seen;
+        lastMine = mine;
+      }
+      lastReport = millis();
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 

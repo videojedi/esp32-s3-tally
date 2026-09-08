@@ -233,7 +233,7 @@ The text label is filtered to printable ASCII and trimmed.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Configuration page (static; fills itself from `/api/config` and `/status`) |
-| `/status` | GET | JSON status (tally, text, IP, connection, TSL packet count, age and sender) |
+| `/status` | GET | JSON status (tally, text, IP, connection, TSL packet count since boot, age and sender) |
 | `/api/config` | GET | JSON of every setting plus hostname, MAC, AP details, firmware and build; in Tally Arbiter mode also `taDevices` (the server's device list) and `taDeviceName` |
 | `/info` | GET | JSON device info (hostname, MAC, TSL address, firmware, build) |
 | `/test?state=N` | GET | Set tally state (0-3) at max brightness |
@@ -378,6 +378,20 @@ The script will:
 Bumps `FIRMWARE_VERSION`, builds, signs the binary, commits, tags, pushes, uploads `tsl-tally-<version>.bin` to S3 and rewrites the manifest with version, URL, MD5, SHA-256, signature, size, date and the notes given as arguments. Safe to rerun for the same version. Needs the AWS CLI and a `.env` in the project root with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `S3_BUCKET` (not committed).
 
 `GITHUB=1 ./release.sh ...` also creates a GitHub release with `firmware.bin` attached, for devices still on 1.0.12 or earlier.
+
+## Performance and Packet Rates
+
+The receiver drains every queued packet each pass, only looks at the address byte of frames for other addresses, and redraws the LEDs only when the state, brightness or text changed, so a switcher repeating all 127 addresses several times a second costs the tally almost nothing. Measured on the bench with unicast frames it keeps a median response under 50 ms at 1200 packets/s and stays usable at 2500/s.
+
+**Multicast over WiFi is the limit, not the tally.** An access point forwards multicast to WiFi clients at its lowest basic rate, often 1 to 6 Mbit/s on 2.4 GHz, without acknowledgements. A few hundred small TSL frames a second already fill that, frames get dropped and the light lags by seconds; at around 1000 frames/s it stops responding. The same flood as unicast is fine. If a tally on WiFi is slow when the switcher is busy:
+
+- Use Ethernet for that tally (no such limit on the wire).
+- Turn on multicast-to-unicast conversion on the access point (UniFi "Multicast enhancement", Cisco/Aruba "multicast to unicast", Ruckus "directed multicast").
+- Point the sender at the tally's IP instead of the group. The tally accepts unicast TSL on its port as well as the multicast group.
+- Lower the sender's repeat rate if it has one.
+- Or run the tally in Tally Arbiter mode, which is a unicast TCP connection.
+
+WiFi modem sleep is disabled in the firmware because it adds tens of milliseconds to every received frame and drops multicast.
 
 ## Factory Reset
 
